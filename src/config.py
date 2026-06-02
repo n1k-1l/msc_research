@@ -12,7 +12,7 @@ hyperparameters; no new configuration machinery is required.
 """
 from __future__ import annotations
 from dataclasses import dataclass, asdict, field
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Optional, Union
 
 
 @dataclass
@@ -28,13 +28,15 @@ class ExpConfig:
     batch_size: int = 128
     activation: str = "relu"
     val_fraction: float = 0.1
-    # Curvature-aware dropout (Eq. 4); ignored unless dropout_kind == "curvature".
+    # Hook-driven per-neuron dropout (Eq. 4). Active only when prob_source is set
+    # (and dropout_kind == "per_neuron"); otherwise per-neuron dropout stays at
+    # the static constant p. These fields are otherwise ignored.
     warmup_epochs: int = 0             # uniform-dropout warm-up before activation (N_warm)
-    recompute_every: int = 0           # epochs between curvature recomputations (Delta)
+    recompute_every: int = 0           # epochs between recomputations (Delta)
     alpha: Union[float, List[float]] = 2.0   # sigmoid sensitivity (scalar or per hidden layer)
     beta: Union[float, List[float]] = 0.0    # sigmoid offset (scalar or per hidden layer)
-    standardize_curvature: bool = True       # z-score each layer's curvature before the sigmoid
-    curvature_source: str = "forman"         # "forman" | "magnitude" | "random" (see curvature.py)
+    standardize: bool = True                 # z-score each layer's signal before the sigmoid
+    prob_source: Optional[str] = None        # None (static) | "forman" | "magnitude" | "random"
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -73,22 +75,31 @@ def _baselines() -> Dict[str, ExpConfig]:
         # are tuned on validation; these are starting points.
         cfgs[f"{tag}_curvature"] = ExpConfig(
             name=f"{tag}_curvature", dataset=dataset, widths=widths,
-            dropout_kind="curvature", p=0.5, epochs=epochs,
+            dropout_kind="per_neuron", p=0.5, epochs=epochs,
             warmup_epochs=5, recompute_every=5, alpha=2.0, beta=0.0,
-            curvature_source="forman")
-        # Controls sharing the curvature mechanism but a different per-neuron
-        # signal, to show the geometric signal (not mere non-uniformity or raw
-        # magnitude) drives any effect.
+            prob_source="forman")
+        # Controls sharing the per-neuron hook mechanism but a different signal,
+        # to show the geometric signal (not mere non-uniformity or raw magnitude)
+        # drives any effect.
         cfgs[f"{tag}_magnitude"] = ExpConfig(
             name=f"{tag}_magnitude", dataset=dataset, widths=widths,
-            dropout_kind="curvature", p=0.5, epochs=epochs,
+            dropout_kind="per_neuron", p=0.5, epochs=epochs,
             warmup_epochs=5, recompute_every=5, alpha=2.0, beta=0.0,
-            curvature_source="magnitude")
+            prob_source="magnitude")
         cfgs[f"{tag}_random"] = ExpConfig(
             name=f"{tag}_random", dataset=dataset, widths=widths,
-            dropout_kind="curvature", p=0.5, epochs=epochs,
+            dropout_kind="per_neuron", p=0.5, epochs=epochs,
             warmup_epochs=5, recompute_every=5, alpha=2.0, beta=0.0,
-            curvature_source="random")
+            prob_source="random")
+        # Targeted-Dropout direction: negative alpha retains high-magnitude
+        # neurons and drops low-magnitude ones (the opposite of _magnitude). A
+        # soft per-neuron stand-in for Gomez et al. (2018), as a magnitude
+        # comparator with the sensible importance direction.
+        cfgs[f"{tag}_targeted"] = ExpConfig(
+            name=f"{tag}_targeted", dataset=dataset, widths=widths,
+            dropout_kind="per_neuron", p=0.5, epochs=epochs,
+            warmup_epochs=5, recompute_every=5, alpha=-2.0, beta=0.0,
+            prob_source="magnitude")
     return cfgs
 
 

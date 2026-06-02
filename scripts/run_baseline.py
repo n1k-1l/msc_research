@@ -40,14 +40,15 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
                 p=cfg.p, activation=cfg.activation)
     print(f"  params: {model.num_parameters():,} | device: {device}")
 
-    # Curvature-aware dropout is added through the epoch hook; baselines pass None.
+    # Hook-driven per-neuron dropout (curvature method and its controls) is added
+    # through the epoch hook when prob_source is set; baselines pass None.
     hook = None
-    if cfg.dropout_kind == "curvature":
+    if cfg.prob_source is not None:
         hook = make_curvature_hook(
             p_base=cfg.p, alpha=cfg.alpha, beta=cfg.beta,
             warmup_epochs=cfg.warmup_epochs, recompute_every=cfg.recompute_every,
-            standardize=cfg.standardize_curvature,
-            source=get_source(cfg.curvature_source))
+            standardize=cfg.standardize,
+            source=get_source(cfg.prob_source))
 
     record = {**cfg.to_dict(), "seed": seed}
     result = train(model, data.train, data.val, data.test, device,
