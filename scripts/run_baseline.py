@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import get_config
+from src.curvature import make_curvature_hook, get_source
 from src.data import get_data
 from src.metrics import summarize_config
 from src.models import MLP
@@ -39,10 +40,19 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
                 p=cfg.p, activation=cfg.activation)
     print(f"  params: {model.num_parameters():,} | device: {device}")
 
+    # Curvature-aware dropout is added through the epoch hook; baselines pass None.
+    hook = None
+    if cfg.dropout_kind == "curvature":
+        hook = make_curvature_hook(
+            p_base=cfg.p, alpha=cfg.alpha, beta=cfg.beta,
+            warmup_epochs=cfg.warmup_epochs, recompute_every=cfg.recompute_every,
+            standardize=cfg.standardize_curvature,
+            source=get_source(cfg.curvature_source))
+
     record = {**cfg.to_dict(), "seed": seed}
     result = train(model, data.train, data.val, data.test, device,
                    epochs=cfg.epochs, lr=cfg.lr, weight_decay=cfg.weight_decay,
-                   config=record, epoch_hook=None)
+                   config=record, epoch_hook=hook)
 
     out = {
         "config": record,
@@ -54,6 +64,9 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
         "total_seconds": result.total_seconds,
         "history": result.history,
     }
+    # Curvature distribution evolution (proposal secondary metric); append-only.
+    if hook is not None:
+        out["curvature_log"] = hook.log
     path = results_dir / f"{cfg.name}_seed{seed}.json"
     path.write_text(json.dumps(out, indent=2))
     print(f"  saved -> {path}")

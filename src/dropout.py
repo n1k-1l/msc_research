@@ -96,6 +96,9 @@ def build_dropout(kind: str, num_neurons: int, p: float) -> nn.Module:
         return NoDropout()
     if kind == "uniform":
         return UniformDropout(p)
-    if kind == "per_neuron":
+    # "curvature" uses the same module as "per_neuron"; the curvature epoch hook
+    # drives its per-neuron probabilities. It starts at constant p (= uniform),
+    # which is what the warm-up phase trains with.
+    if kind in ("per_neuron", "curvature"):
         return PerNeuronDropout(num_neurons, p)
     raise ValueError(f"unknown dropout kind: {kind!r}")

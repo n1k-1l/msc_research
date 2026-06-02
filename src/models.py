@@ -70,5 +70,14 @@ class MLP(nn.Module):
                 if isinstance(m, PerNeuronDropout)
                 or m.__class__.__name__ in ("UniformDropout", "NoDropout")]
 
+    def linear_layers(self) -> List[nn.Linear]:
+        """The Linear layers in forward order.
+
+        These are the weight matrices of the network's weight graph: the k-th
+        Linear connects layer k to layer k+1, and the k-th PerNeuronDropout
+        (from dropout_modules()) follows the output of the k-th Linear.
+        """
+        return [m for m in self.net if isinstance(m, nn.Linear)]
+
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

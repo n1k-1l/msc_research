@@ -1,0 +1,340 @@
+"""
+Curvature-aware dropout.
+
+Computes discrete Forman-Ricci curvature on the weight graph of an MLP, maps it
+to per-neuron dropout probabilities, and exposes the whole thing as an
+epoch_hook so it plugs into the existing training loop without changing it.
+
+Weight graph (proposal section 3). For each adjacent layer pair (L_k, L_{k+1})
+a weighted bipartite graph is formed whose edge weights are the absolute values
+of the connecting parameters. The graph is fully connected: a neuron in layer k
+has degree equal to the width of layer k+1. Each edge therefore belongs to
+exactly one layer pair, and a hidden neuron belongs to the two pairs on either
+side of it.
+
+Forman-Ricci curvature (Eq. 2). For an edge e between vertices u, v with edge
+weight w_e, vertex weights w_u, w_v, and adjacent edges e' incident to either
+endpoint (excluding e):
+
+    F(e) = w_e * ( w_u/w_e + w_v/w_e
+                   - sum_{e' ~ u} w_u / sqrt(w_e w_e')
+                   - sum_{e' ~ v} w_v / sqrt(w_e w_e') )
+
+Defining a per-vertex strength S(v) = sum_{e incident to v} 1/sqrt(w_e) (the sum
+runs over the edges of the one pair the vertex is considered in, and includes e
+itself), this collapses to the closed form used below:
+
+    F(e=(u,v)) = 2 (w_u + w_v) - sqrt(w_e) * ( w_u S(u) + w_v S(v) )
+
+which is a single vectorised expression over the pair's weight matrix. With unit
+vertex weights it reduces to the unweighted special case F = 4 - deg(u) - deg(v),
+which is used as a correctness check.
+
+Per-neuron curvature (Eq. 3) averages the curvature of a neuron's incident edges,
+spanning both pairs a hidden neuron belongs to.
+
+Curvature-to-dropout (Eq. 4) maps curvature to a drop probability via a shifted
+sigmoid, then renormalises so the expected number of dropped neurons per layer
+matches uniform dropout at rate p_base:
+
+    p~_i = p_base * sigmoid(alpha * (kappa_i - beta))
+    p_i  = (n * p_base / sum_j p~_j) * p~_i
+
+Higher curvature (redundant neighbourhoods) gives higher dropout; negative
+curvature (bottlenecks) gives lower dropout, so such neurons are retained more
+often.
+"""
+from __future__ import annotations
+from typing import Callable, List, Dict, Any, Optional, Sequence, Union
+import torch
+import torch.nn as nn
+
+from .dropout import PerNeuronDropout
+
+# Largest drop probability handed to PerNeuronDropout; its forward divides by
+# (1 - p), so p must stay strictly below 1.
+_P_MAX = 1.0 - 1e-4
+
+
+@torch.no_grad()
+def forman_edges(
+    A: torch.Tensor,
+    w_src: Optional[torch.Tensor] = None,
+    w_tgt: Optional[torch.Tensor] = None,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Forman-Ricci curvature of every edge in one bipartite layer pair.
+
+    Args:
+        A: (n_tgt, n_src) matrix of absolute edge weights for a pair
+           (L_k, L_{k+1}); A[a, b] is the edge between source neuron b in L_k and
+           target neuron a in L_{k+1} (the shape of a Linear's weight matrix).
+        w_src, w_tgt: vertex weights for the source / target layers. Default to
+           ones, which reproduces the unweighted special case.
+
+    Returns:
+        F with the same shape as A; F[a, b] is that edge's curvature.
+    """
+    n_tgt, n_src = A.shape
+    if w_src is None:
+        w_src = torch.ones(n_src, device=A.device, dtype=A.dtype)
+    if w_tgt is None:
+        w_tgt = torch.ones(n_tgt, device=A.device, dtype=A.dtype)
+
+    inv_sqrt = A.clamp_min(eps).rsqrt()
+    # strength S(v) = sum over the pair's incident edges of 1/sqrt(w_e)
+    s_src = (w_src * inv_sqrt.sum(dim=0)).unsqueeze(0)   # (1, n_src)
+    s_tgt = (w_tgt * inv_sqrt.sum(dim=1)).unsqueeze(1)   # (n_tgt, 1)
+    return (2.0 * (w_src.unsqueeze(0) + w_tgt.unsqueeze(1))
+            - A.sqrt() * (s_src + s_tgt))
+
+
+@torch.no_grad()
+def per_neuron_curvature(
+    weights: List[torch.Tensor],
+    vertex_weights: Optional[List[torch.Tensor]] = None,
+) -> List[torch.Tensor]:
+    """Per-neuron Forman-Ricci curvature for every layer (Eq. 3).
+
+    Each edge's curvature is computed within its bipartite layer pair; a neuron's
+    curvature is then the mean over its incident edges, which for a hidden neuron
+    spans the pairs on both sides of it.
+
+    Args:
+        weights: ordered Linear weight tensors [W_1, ..., W_L]; W_k has shape
+            (size(L_k), size(L_{k-1})).
+        vertex_weights: optional per-layer vertex weights, indexed by layer
+            (input .. output). Defaults to unit weights.
+
+    Returns:
+        A list of 1-D tensors, one per layer (input .. output). For driving
+        dropout, the entry for hidden layer k is at index k.
+    """
+    A = [W.abs() for W in weights]
+    sizes = [A[0].shape[1]] + [a.shape[0] for a in A]
+    dev, dtype = A[0].device, A[0].dtype
+
+    kappa_sum = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
+    degree = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
+    for k, a in enumerate(A):
+        w_src = vertex_weights[k] if vertex_weights else None
+        w_tgt = vertex_weights[k + 1] if vertex_weights else None
+        F = forman_edges(a, w_src, w_tgt)
+        kappa_sum[k] += F.sum(dim=0)          # source side (layer k)
+        kappa_sum[k + 1] += F.sum(dim=1)      # target side (layer k+1)
+        degree[k] += F.shape[0]
+        degree[k + 1] += F.shape[1]
+    return [ks / d for ks, d in zip(kappa_sum, degree)]
+
+
+@torch.no_grad()
+def weight_magnitude(weights: List[torch.Tensor]) -> List[torch.Tensor]:
+    """Per-neuron mean absolute incident weight (weight-magnitude control).
+
+    A non-geometric comparator: drives dropout from mean |w| per neuron instead
+    of curvature, to test whether the Forman signal adds anything beyond raw
+    magnitude (proposal section 4). Same per-layer layout as per_neuron_curvature.
+    """
+    A = [W.abs() for W in weights]
+    sizes = [A[0].shape[1]] + [a.shape[0] for a in A]
+    dev, dtype = A[0].device, A[0].dtype
+    total = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
+    degree = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
+    for k, a in enumerate(A):
+        total[k] += a.sum(dim=0)
+        total[k + 1] += a.sum(dim=1)
+        degree[k] += a.shape[0]
+        degree[k + 1] += a.shape[1]
+    return [t / d for t, d in zip(total, degree)]
+
+
+@torch.no_grad()
+def random_curvature(weights: List[torch.Tensor]) -> List[torch.Tensor]:
+    """Random per-neuron scores (random-curvature control).
+
+    Drives the same renormalised mapping with random values, isolating whether
+    the curvature signal (rather than mere non-uniformity) drives any effect.
+    Redrawn at each recomputation; reproducible through the global seed.
+    """
+    w0 = weights[0]
+    sizes = [w0.shape[1]] + [W.shape[0] for W in weights]
+    return [torch.randn(n, device=w0.device, dtype=w0.dtype) for n in sizes]
+
+
+# Selectable per-neuron signal for the curvature hook: the method and its controls.
+CURVATURE_SOURCES: Dict[str, Callable[[List[torch.Tensor]], List[torch.Tensor]]] = {
+    "forman": per_neuron_curvature,
+    "magnitude": weight_magnitude,
+    "random": random_curvature,
+}
+
+
+def get_source(name: str) -> Callable[[List[torch.Tensor]], List[torch.Tensor]]:
+    """Look up a per-neuron signal function by name."""
+    try:
+        return CURVATURE_SOURCES[name]
+    except KeyError:
+        raise ValueError(f"unknown curvature source {name!r}; "
+                         f"choices: {sorted(CURVATURE_SOURCES)}")
+
+
+@torch.no_grad()
+def curvature_to_probs(
+    kappa: torch.Tensor,
+    p_base: float,
+    alpha: float,
+    beta: float,
+    standardize: bool = False,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Map per-neuron curvature to renormalised drop probabilities (Eq. 4).
+
+    Raw Forman curvature scales with layer width, so the location of the curvature
+    distribution differs sharply between layers. With standardize=True the layer's
+    curvature is z-scored (mean 0, unit std) before the sigmoid, which makes alpha
+    and beta dimensionless and behave consistently across layers and
+    architectures; this is equivalent to deriving a per-layer alpha = alpha/std and
+    beta from the layer's own distribution.
+
+    The renormalisation keeps the expected per-layer drop count equal to uniform
+    dropout at rate p_base. The final clamp to [0, 1) is required because the
+    renormalisation can push individual probabilities to or above 1; when it
+    fires it perturbs the budget slightly (see clamped_fraction).
+    """
+    if standardize:
+        kappa = (kappa - kappa.mean()) / (kappa.std(unbiased=False) + eps)
+    p_tilde = p_base * torch.sigmoid(alpha * (kappa - beta))
+    n = kappa.numel()
+    p = (n * p_base / (p_tilde.sum() + eps)) * p_tilde
+    return p.clamp(0.0, _P_MAX)
+
+
+def clamped_fraction(probs: torch.Tensor) -> float:
+    """Fraction of probabilities the clamp pinned at the maximum (budget leak)."""
+    return float((probs >= _P_MAX).float().mean().item())
+
+
+def _layer_stats(kappa: torch.Tensor, probs: torch.Tensor) -> Dict[str, float]:
+    return {
+        "kappa_min": float(kappa.min()),
+        "kappa_mean": float(kappa.mean()),
+        "kappa_max": float(kappa.max()),
+        "kappa_std": float(kappa.std(unbiased=False)),
+        "p_min": float(probs.min()),
+        "p_mean": float(probs.mean()),
+        "p_max": float(probs.max()),
+        "clamped_fraction": clamped_fraction(probs),
+    }
+
+
+class CurvatureHook:
+    """epoch_hook that activates and refreshes curvature-aware dropout.
+
+    Training protocol (proposal section 3): uniform dropout for the first
+    warmup_epochs, then curvature is computed and per-neuron dropout activated,
+    recomputed every recompute_every epochs as the weights evolve. During warm-up
+    the PerNeuronDropout modules keep their initial constant p, which is
+    equivalent to uniform dropout, so nothing special is needed for that phase.
+
+    The per-recompute curvature distribution is recorded in `log` so the
+    "curvature distribution evolution" metric can be reported. The runner reads
+    `hook.log` after training and appends it to the result JSON.
+
+    Args:
+        p_base: Eq. 4 dropout budget (shared across layers).
+        alpha, beta: Eq. 4 sensitivity and offset. Each may be a scalar (used
+            for every layer) or a per-hidden-layer sequence. Raw Forman curvature
+            scales with layer width, so the curvature distributions of different
+            layers sit at very different locations; per-layer alpha/beta let each
+            sigmoid be placed on its own layer's distribution.
+        warmup_epochs: epochs of uniform dropout before activation (N_warm).
+        recompute_every: epochs between recomputations (Delta); <= 1 recomputes
+            every epoch after warm-up.
+        standardize: z-score each layer's curvature before the sigmoid, so a
+            single (alpha, beta) transfers across layers of different widths.
+        source: function mapping the ordered weight tensors to per-layer
+            curvature; defaults to per_neuron_curvature. Swap it for the
+            random-curvature or weight-magnitude controls.
+        record: whether to populate `log`.
+    """
+
+    def __init__(
+        self,
+        p_base: float,
+        alpha: Union[float, Sequence[float]],
+        beta: Union[float, Sequence[float]],
+        warmup_epochs: int,
+        recompute_every: int,
+        standardize: bool = False,
+        source: Callable[[List[torch.Tensor]], List[torch.Tensor]] = per_neuron_curvature,
+        record: bool = True,
+    ):
+        self.p_base = p_base
+        self.alpha = alpha
+        self.beta = beta
+        self.warmup_epochs = warmup_epochs
+        self.recompute_every = max(1, recompute_every)
+        self.standardize = standardize
+        self.source = source
+        self.record = record
+        self.log: List[Dict[str, Any]] = []
+
+    def _should_recompute(self, epoch: int) -> bool:
+        if epoch < self.warmup_epochs:
+            return False
+        return (epoch - self.warmup_epochs) % self.recompute_every == 0
+
+    @staticmethod
+    def _resolve(value: Union[float, Sequence[float]], k: int, n: int,
+                 name: str) -> float:
+        """Per-layer value: scalars broadcast, sequences are indexed by layer."""
+        if isinstance(value, (int, float)):
+            return float(value)
+        seq = list(value)
+        assert len(seq) == n, (
+            f"{name} has {len(seq)} entries but there are {n} hidden layers")
+        return float(seq[k])
+
+    @torch.no_grad()
+    def __call__(self, model: nn.Module, epoch: int) -> None:
+        if not self._should_recompute(epoch):
+            return
+
+        linears = model.linear_layers()
+        drops = [m for m in model.dropout_modules()
+                 if isinstance(m, PerNeuronDropout)]
+        assert len(drops) == len(linears) - 1, (
+            "curvature dropout expects a PerNeuronDropout after every hidden "
+            f"layer; got {len(drops)} dropouts for {len(linears)} linear layers")
+
+        kappa = self.source([lin.weight for lin in linears])
+        n_hidden = len(drops)
+        layer_log: List[Dict[str, float]] = []
+        for k, drop in enumerate(drops):
+            # drop k follows linears[k], whose output is hidden layer (k + 1).
+            kv = kappa[k + 1]
+            alpha_k = self._resolve(self.alpha, k, n_hidden, "alpha")
+            beta_k = self._resolve(self.beta, k, n_hidden, "beta")
+            probs = curvature_to_probs(kv, self.p_base, alpha_k, beta_k,
+                                       standardize=self.standardize)
+            drop.set_probs(probs)
+            if self.record:
+                layer_log.append(_layer_stats(kv, probs))
+
+        if self.record:
+            self.log.append({"epoch": epoch, "layers": layer_log})
+
+
+def make_curvature_hook(
+    p_base: float,
+    alpha: Union[float, Sequence[float]],
+    beta: Union[float, Sequence[float]],
+    warmup_epochs: int,
+    recompute_every: int,
+    standardize: bool = False,
+    source: Callable[[List[torch.Tensor]], List[torch.Tensor]] = per_neuron_curvature,
+    record: bool = True,
+) -> CurvatureHook:
+    """Build a CurvatureHook. See CurvatureHook for the arguments."""
+    return CurvatureHook(p_base, alpha, beta, warmup_epochs, recompute_every,
+                         standardize=standardize, source=source, record=record)
