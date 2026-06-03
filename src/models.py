@@ -58,7 +58,7 @@ class MLP(nn.Module):
         return self.net(x)
 
     def dropout_modules(self) -> List[nn.Module]:
-        """Per-hidden-layer dropout modules, in forward order.
+        """Accessor for per-hidden-layer dropout modules, in forward order.
 
         Lets a caller iterate over the dropout layers and update per-neuron
         probabilities, for example:

@@ -107,8 +107,11 @@ def main() -> None:
     print(f"  performance | test acc      : {perf['mean']:.4f} +/- {perf['std']:.4f}")
     if summary["generalization"]["gap_available"]:
         print(f"  gap         | train-test    : {gen['mean']:+.4f} +/- {gen['std']:.4f}")
-    print(f"  convergence | ep to val>={conv['val_threshold']:.2f}: "
-          f"{e2t['mean']:.1f} +/- {e2t['std']:.1f}")
+    # e2t mean is None when no seed reached the threshold (e.g. a run that
+    # diverged) -- a real, reportable outcome, so don't crash formatting it.
+    e2t_str = (f"{e2t['mean']:.1f} +/- {e2t['std']:.1f}"
+               if e2t["mean"] is not None else "not reached")
+    print(f"  convergence | ep to val>={conv['val_threshold']:.2f}: {e2t_str}")
     print(f"              | val AUC (mean) : {conv['val_auc']['mean']:.4f}")
     print(f"              | train seconds  : {conv['train_seconds']['mean']:.1f}")
     print(f"{'='*60}")
