@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import get_config
-from src.curvature import make_curvature_hook, get_source
+from src.curvature import make_dropout_prob_hook, get_source
 from src.data import get_data
 from src.metrics import summarize_config
 from src.models import MLP
@@ -44,7 +44,7 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
     # through the epoch hook when prob_source is set; baselines pass None.
     hook = None
     if cfg.prob_source is not None:
-        hook = make_curvature_hook(
+        hook = make_dropout_prob_hook(
             p_base=cfg.p, alpha=cfg.alpha, beta=cfg.beta,
             warmup_epochs=cfg.warmup_epochs, recompute_every=cfg.recompute_every,
             standardize=cfg.standardize,

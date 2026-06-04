@@ -5,6 +5,12 @@ Computes discrete Forman-Ricci curvature on the weight graph of an MLP, maps it
 to per-neuron dropout probabilities, and exposes the whole thing as an
 epoch_hook so it plugs into the existing training loop without changing it.
 
+The hook mechanism is signal-agnostic: it drives per-neuron dropout from any
+per-neuron "score" function (see SCORE_SOURCES), of which Forman curvature is the
+method and weight-magnitude / random are controls. The Eq. 4 mapping below
+applies to whatever score is supplied; only per_neuron_curvature / forman_edges
+are about curvature specifically.
+
 Weight graph (proposal section 3). For each adjacent layer pair (L_k, L_{k+1})
 a weighted bipartite graph is formed whose edge weights are the absolute values
 of the connecting parameters. The graph is fully connected: a neuron in layer k
@@ -33,16 +39,16 @@ which is used as a correctness check.
 Per-neuron curvature (Eq. 3) averages the curvature of a neuron's incident edges,
 spanning both pairs a hidden neuron belongs to.
 
-Curvature-to-dropout (Eq. 4) maps curvature to a drop probability via a shifted
-sigmoid, then renormalises so the expected number of dropped neurons per layer
-matches uniform dropout at rate p_base:
+Score-to-dropout (Eq. 4) maps the per-neuron score to a drop probability via a
+shifted sigmoid, then renormalises so the expected number of dropped neurons per
+layer matches uniform dropout at rate p_base:
 
-    p~_i = p_base * sigmoid(alpha * (kappa_i - beta))
+    p~_i = p_base * sigmoid(alpha * (score_i - beta))
     p_i  = (n * p_base / sum_j p~_j) * p~_i
 
-Higher curvature (redundant neighbourhoods) gives higher dropout; negative
-curvature (bottlenecks) gives lower dropout, so such neurons are retained more
-often.
+For curvature, higher curvature (redundant neighbourhoods) gives higher dropout;
+negative curvature (bottlenecks) gives lower dropout, so such neurons are
+retained more often.
 """
 from __future__ import annotations
 from typing import Callable, List, Dict, Any, Optional, Sequence, Union
@@ -54,6 +60,10 @@ from .dropout import PerNeuronDropout
 # Largest drop probability handed to PerNeuronDropout; its forward divides by
 # (1 - p), so p must stay strictly below 1.
 _P_MAX = 1.0 - 1e-4
+
+# A per-neuron score function: ordered Linear weight tensors -> one score vector
+# per layer (input .. output).
+ScoreFn = Callable[[List[torch.Tensor]], List[torch.Tensor]]
 
 
 @torch.no_grad()
@@ -161,40 +171,43 @@ def random_curvature(weights: List[torch.Tensor]) -> List[torch.Tensor]:
     return [torch.randn(n, device=w0.device, dtype=w0.dtype) for n in sizes]
 
 
-# Selectable per-neuron signal for the curvature hook: the method and its controls.
-CURVATURE_SOURCES: Dict[str, Callable[[List[torch.Tensor]], List[torch.Tensor]]] = {
+# Selectable per-neuron score function: the method and its controls.
+SCORE_SOURCES: Dict[str, ScoreFn] = {
     "forman": per_neuron_curvature,
     "magnitude": weight_magnitude,
     "random": random_curvature,
 }
 
 
-def get_source(name: str) -> Callable[[List[torch.Tensor]], List[torch.Tensor]]:
-    """Look up a per-neuron signal function by name."""
+def get_source(name: str) -> ScoreFn:
+    """Look up a per-neuron score function by name."""
     try:
-        return CURVATURE_SOURCES[name]
+        return SCORE_SOURCES[name]
     except KeyError:
-        raise ValueError(f"unknown curvature source {name!r}; "
-                         f"choices: {sorted(CURVATURE_SOURCES)}")
+        raise ValueError(f"unknown score source {name!r}; "
+                         f"choices: {sorted(SCORE_SOURCES)}")
 
 
 @torch.no_grad()
-def curvature_to_probs(
-    kappa: torch.Tensor,
+def scores_to_probs(
+    scores: torch.Tensor,
     p_base: float,
     alpha: float,
     beta: float,
     standardize: bool = False,
     eps: float = 1e-12,
 ) -> torch.Tensor:
-    """Map per-neuron curvature to renormalised drop probabilities (Eq. 4).
+    """Map a per-neuron score to renormalised drop probabilities (Eq. 4).
 
-    Raw Forman curvature scales with layer width, so the location of the curvature
+    The score is whatever the source produced (Forman curvature, weight
+    magnitude, random); this mapping is signal-agnostic.
+
+    Raw Forman curvature scales with layer width, so the location of the score
     distribution differs sharply between layers. With standardize=True the layer's
-    curvature is z-scored (mean 0, unit std) before the sigmoid, which makes alpha
-    and beta dimensionless and behave consistently across layers and
-    architectures; this is equivalent to deriving a per-layer alpha = alpha/std and
-    beta from the layer's own distribution.
+    score is z-scored (mean 0, unit std) before the sigmoid, which makes alpha and
+    beta dimensionless and behave consistently across layers and architectures;
+    this is equivalent to deriving a per-layer alpha = alpha/std and beta from the
+    layer's own distribution.
 
     The renormalisation keeps the expected per-layer drop count equal to uniform
     dropout at rate p_base. The final clamp to [0, 1) is required because the
@@ -202,9 +215,9 @@ def curvature_to_probs(
     fires it perturbs the budget slightly (see clamped_fraction).
     """
     if standardize:
-        kappa = (kappa - kappa.mean()) / (kappa.std(unbiased=False) + eps)
-    p_tilde = p_base * torch.sigmoid(alpha * (kappa - beta))
-    n = kappa.numel()
+        scores = (scores - scores.mean()) / (scores.std(unbiased=False) + eps)
+    p_tilde = p_base * torch.sigmoid(alpha * (scores - beta))
+    n = scores.numel()
     p = (n * p_base / (p_tilde.sum() + eps)) * p_tilde
     return p.clamp(0.0, _P_MAX)
 
@@ -214,12 +227,12 @@ def clamped_fraction(probs: torch.Tensor) -> float:
     return float((probs >= _P_MAX).float().mean().item())
 
 
-def _layer_stats(kappa: torch.Tensor, probs: torch.Tensor) -> Dict[str, float]:
+def _layer_stats(scores: torch.Tensor, probs: torch.Tensor) -> Dict[str, float]:
     return {
-        "kappa_min": float(kappa.min()),
-        "kappa_mean": float(kappa.mean()),
-        "kappa_max": float(kappa.max()),
-        "kappa_std": float(kappa.std(unbiased=False)),
+        "score_min": float(scores.min()),
+        "score_mean": float(scores.mean()),
+        "score_max": float(scores.max()),
+        "score_std": float(scores.std(unbiased=False)),
         "p_min": float(probs.min()),
         "p_mean": float(probs.mean()),
         "p_max": float(probs.max()),
@@ -227,16 +240,17 @@ def _layer_stats(kappa: torch.Tensor, probs: torch.Tensor) -> Dict[str, float]:
     }
 
 
-class CurvatureHook:
-    """epoch_hook that activates and refreshes curvature-aware dropout.
+class DropoutProbHook:
+    """epoch_hook that activates and refreshes hook-driven per-neuron dropout.
 
     Training protocol (proposal section 3): uniform dropout for the first
-    warmup_epochs, then curvature is computed and per-neuron dropout activated,
-    recomputed every recompute_every epochs as the weights evolve. During warm-up
-    the PerNeuronDropout modules keep their initial constant p, which is
-    equivalent to uniform dropout, so nothing special is needed for that phase.
+    warmup_epochs, then the per-neuron score is computed and per-neuron dropout
+    activated, recomputed every recompute_every epochs as the weights evolve.
+    During warm-up the PerNeuronDropout modules keep their initial constant p,
+    which is equivalent to uniform dropout, so nothing special is needed for that
+    phase.
 
-    The per-recompute curvature distribution is recorded in `log` so the
+    The per-recompute score / probability distribution is recorded in `log` so the
     "curvature distribution evolution" metric can be reported. The runner reads
     `hook.log` after training and appends it to the result JSON.
 
@@ -244,17 +258,17 @@ class CurvatureHook:
         p_base: Eq. 4 dropout budget (shared across layers).
         alpha, beta: Eq. 4 sensitivity and offset. Each may be a scalar (used
             for every layer) or a per-hidden-layer sequence. Raw Forman curvature
-            scales with layer width, so the curvature distributions of different
+            scales with layer width, so the score distributions of different
             layers sit at very different locations; per-layer alpha/beta let each
             sigmoid be placed on its own layer's distribution.
         warmup_epochs: epochs of uniform dropout before activation (N_warm).
         recompute_every: epochs between recomputations (Delta); <= 1 recomputes
             every epoch after warm-up.
-        standardize: z-score each layer's curvature before the sigmoid, so a
-            single (alpha, beta) transfers across layers of different widths.
-        source: function mapping the ordered weight tensors to per-layer
-            curvature; defaults to per_neuron_curvature. Swap it for the
-            random-curvature or weight-magnitude controls.
+        standardize: z-score each layer's score before the sigmoid, so a single
+            (alpha, beta) transfers across layers of different widths.
+        source: per-neuron score function (see SCORE_SOURCES); defaults to
+            per_neuron_curvature (the method). Swap it for the weight-magnitude or
+            random controls.
         record: whether to populate `log`.
     """
 
@@ -266,7 +280,7 @@ class CurvatureHook:
         warmup_epochs: int,
         recompute_every: int,
         standardize: bool = False,
-        source: Callable[[List[torch.Tensor]], List[torch.Tensor]] = per_neuron_curvature,
+        source: ScoreFn = per_neuron_curvature,
         record: bool = True,
     ):
         self.p_base = p_base
@@ -282,6 +296,7 @@ class CurvatureHook:
     def _should_recompute(self, epoch: int) -> bool:
         if epoch < self.warmup_epochs:
             return False
+        # Below is true every self.recompute_every epochs
         return (epoch - self.warmup_epochs) % self.recompute_every == 0
 
     @staticmethod
@@ -304,37 +319,38 @@ class CurvatureHook:
         drops = [m for m in model.dropout_modules()
                  if isinstance(m, PerNeuronDropout)]
         assert len(drops) == len(linears) - 1, (
-            "curvature dropout expects a PerNeuronDropout after every hidden "
-            f"layer; got {len(drops)} dropouts for {len(linears)} linear layers")
+            "the per-neuron dropout hook expects a PerNeuronDropout after every "
+            f"hidden layer; got {len(drops)} dropouts for {len(linears)} linear "
+            "layers")
 
-        kappa = self.source([lin.weight for lin in linears])
+        scores = self.source([lin.weight for lin in linears])
         n_hidden = len(drops)
         layer_log: List[Dict[str, float]] = []
         for k, drop in enumerate(drops):
             # drop k follows linears[k], whose output is hidden layer (k + 1).
-            kv = kappa[k + 1]
+            score = scores[k + 1]
             alpha_k = self._resolve(self.alpha, k, n_hidden, "alpha")
             beta_k = self._resolve(self.beta, k, n_hidden, "beta")
-            probs = curvature_to_probs(kv, self.p_base, alpha_k, beta_k,
-                                       standardize=self.standardize)
+            probs = scores_to_probs(score, self.p_base, alpha_k, beta_k,
+                                    standardize=self.standardize)
             drop.set_probs(probs)
             if self.record:
-                layer_log.append(_layer_stats(kv, probs))
+                layer_log.append(_layer_stats(score, probs))
 
         if self.record:
             self.log.append({"epoch": epoch, "layers": layer_log})
 
 
-def make_curvature_hook(
+def make_dropout_prob_hook(
     p_base: float,
     alpha: Union[float, Sequence[float]],
     beta: Union[float, Sequence[float]],
     warmup_epochs: int,
     recompute_every: int,
     standardize: bool = False,
-    source: Callable[[List[torch.Tensor]], List[torch.Tensor]] = per_neuron_curvature,
+    source: ScoreFn = per_neuron_curvature,
     record: bool = True,
-) -> CurvatureHook:
-    """Build a CurvatureHook. See CurvatureHook for the arguments."""
-    return CurvatureHook(p_base, alpha, beta, warmup_epochs, recompute_every,
-                         standardize=standardize, source=source, record=record)
+) -> DropoutProbHook:
+    """Build a DropoutProbHook. See DropoutProbHook for the arguments."""
+    return DropoutProbHook(p_base, alpha, beta, warmup_epochs, recompute_every,
+                           standardize=standardize, source=source, record=record)
