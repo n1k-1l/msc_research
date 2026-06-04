@@ -79,22 +79,16 @@ def _baselines() -> Dict[str, ExpConfig]:
             warmup_epochs=5, recompute_every=5, alpha=2.0, beta=0.0,
             prob_source="forman")
         # Controls sharing the per-neuron hook mechanism but a different signal,
-        # to show the geometric signal (not mere non-uniformity or raw magnitude)
-        # drives any effect.
-        cfgs[f"{tag}_magnitude"] = ExpConfig(
-            name=f"{tag}_magnitude", dataset=dataset, widths=widths,
-            dropout_kind="per_neuron", p=0.5, epochs=epochs,
-            warmup_epochs=5, recompute_every=5, alpha=2.0, beta=0.0,
-            prob_source="magnitude")
+        # to show the geometric signal (not mere non-uniformity or weight
+        # magnitude) drives any effect.
         cfgs[f"{tag}_random"] = ExpConfig(
             name=f"{tag}_random", dataset=dataset, widths=widths,
             dropout_kind="per_neuron", p=0.5, epochs=epochs,
             warmup_epochs=5, recompute_every=5, alpha=2.0, beta=0.0,
             prob_source="random")
-        # Targeted-Dropout direction: negative alpha retains high-magnitude
-        # neurons and drops low-magnitude ones (the opposite of _magnitude). A
-        # soft per-neuron stand-in for Gomez et al. (2018), as a magnitude
-        # comparator with the sensible importance direction.
+        # Weight-magnitude comparator in the Targeted-Dropout direction (Gomez et
+        # al. 2018): negative alpha retains high-magnitude neurons and drops
+        # low-magnitude ones. A soft per-neuron stand-in for targeted dropout.
         cfgs[f"{tag}_targeted"] = ExpConfig(
             name=f"{tag}_targeted", dataset=dataset, widths=widths,
             dropout_kind="per_neuron", p=0.5, epochs=epochs,
