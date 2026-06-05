@@ -11,6 +11,7 @@ difference between configs is meaningful or within noise.
 """
 from __future__ import annotations
 import argparse
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -82,9 +83,16 @@ def main() -> None:
     ap.add_argument("--results-dir", default="./results")
     ap.add_argument("--device", default=None,
                     help="force a device (cpu|cuda|mps); default = auto-detect")
+    ap.add_argument("--p", type=float, default=None,
+                    help="override p_base; suffixes the saved config name (e.g. _p30)")
     args = ap.parse_args()
 
     cfg = get_config(args.config)
+    if args.p is not None:
+        # p_base sweep: override the budget and rename so each grid point writes
+        # distinct files and is a distinct config in the analysis.
+        cfg = dataclasses.replace(cfg, p=args.p,
+                                  name=f"{cfg.name}_p{round(args.p * 100):02d}")
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
