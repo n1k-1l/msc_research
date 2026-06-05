@@ -32,9 +32,11 @@ itself), this collapses to the closed form used below:
 
     F(e=(u,v)) = 2 (w_u + w_v) - sqrt(w_e) * ( w_u S(u) + w_v S(v) )
 
-which is a single vectorised expression over the pair's weight matrix. With unit
-vertex weights it reduces to the unweighted special case F = 4 - deg(u) - deg(v),
-which is used as a correctness check.
+which is a single vectorised expression over the pair's weight matrix. The
+implementation fixes vertex weights to 1 (the network supplies only edge
+weights; the vertex weight is a free choice), so it evaluates
+F = 4 - sqrt(w_e) * (S(u) + S(v)); in the fully unweighted case this is the
+special case F = 4 - deg(u) - deg(v), used as a correctness check.
 
 Per-neuron curvature (Eq. 3) averages the curvature of a neuron's incident edges,
 spanning both pairs a hidden neuron belongs to.
@@ -51,7 +53,7 @@ negative curvature (bottlenecks) gives lower dropout, so such neurons are
 retained more often.
 """
 from __future__ import annotations
-from typing import Callable, List, Dict, Any, Optional, Sequence, Union
+from typing import Callable, List, Dict, Any, Sequence, Union
 import torch
 import torch.nn as nn
 
@@ -67,43 +69,31 @@ ScoreFn = Callable[[List[torch.Tensor]], List[torch.Tensor]]
 
 
 @torch.no_grad()
-def forman_edges(
-    A: torch.Tensor,
-    w_src: Optional[torch.Tensor] = None,
-    w_tgt: Optional[torch.Tensor] = None,
-    eps: float = 1e-12,
-) -> torch.Tensor:
+def forman_edges(A: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     """Forman-Ricci curvature of every edge in one bipartite layer pair.
+
+    Vertex weights are fixed to 1: the network supplies only edge weights (|W|),
+    and the vertex weight is a free choice we set to unity. The closed form is
+    then F = 4 - sqrt(w_e) * (S(u) + S(v)), which reduces to F = 4 - deg(u) -
+    deg(v) in the fully unweighted case (the correctness check).
 
     Args:
         A: (n_tgt, n_src) matrix of absolute edge weights for a pair
            (L_k, L_{k+1}); A[a, b] is the edge between source neuron b in L_k and
            target neuron a in L_{k+1} (the shape of a Linear's weight matrix).
-        w_src, w_tgt: vertex weights for the source / target layers. Default to
-           ones, which reproduces the unweighted special case.
 
     Returns:
         F with the same shape as A; F[a, b] is that edge's curvature.
     """
-    n_tgt, n_src = A.shape
-    if w_src is None:
-        w_src = torch.ones(n_src, device=A.device, dtype=A.dtype)
-    if w_tgt is None:
-        w_tgt = torch.ones(n_tgt, device=A.device, dtype=A.dtype)
-
     inv_sqrt = A.clamp_min(eps).rsqrt()
-    # strength S(v) = sum over the pair's incident edges of 1/sqrt(w_e)
-    s_src = (w_src * inv_sqrt.sum(dim=0)).unsqueeze(0)   # (1, n_src)
-    s_tgt = (w_tgt * inv_sqrt.sum(dim=1)).unsqueeze(1)   # (n_tgt, 1)
-    return (2.0 * (w_src.unsqueeze(0) + w_tgt.unsqueeze(1))
-            - A.sqrt() * (s_src + s_tgt))
+    # vertex strength S(v) = sum over the pair's incident edges of 1/sqrt(w_e)
+    s_src = inv_sqrt.sum(dim=0).unsqueeze(0)   # (1, n_src)
+    s_tgt = inv_sqrt.sum(dim=1).unsqueeze(1)   # (n_tgt, 1)
+    return 4.0 - A.sqrt() * (s_src + s_tgt)
 
 
 @torch.no_grad()
-def per_neuron_curvature(
-    weights: List[torch.Tensor],
-    vertex_weights: Optional[List[torch.Tensor]] = None,
-) -> List[torch.Tensor]:
+def per_neuron_curvature(weights: List[torch.Tensor]) -> List[torch.Tensor]:
     """Per-neuron Forman-Ricci curvature for every layer (Eq. 3).
 
     Each edge's curvature is computed within its bipartite layer pair; a neuron's
@@ -113,8 +103,6 @@ def per_neuron_curvature(
     Args:
         weights: ordered Linear weight tensors [W_1, ..., W_L]; W_k has shape
             (size(L_k), size(L_{k-1})).
-        vertex_weights: optional per-layer vertex weights, indexed by layer
-            (input .. output). Defaults to unit weights.
 
     Returns:
         A list of 1-D tensors, one per layer (input .. output). For driving
@@ -127,9 +115,7 @@ def per_neuron_curvature(
     kappa_sum = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
     degree = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
     for k, a in enumerate(A):
-        w_src = vertex_weights[k] if vertex_weights else None
-        w_tgt = vertex_weights[k + 1] if vertex_weights else None
-        F = forman_edges(a, w_src, w_tgt)
+        F = forman_edges(a)
         kappa_sum[k] += F.sum(dim=0)          # source side (layer k)
         kappa_sum[k + 1] += F.sum(dim=1)      # target side (layer k+1)
         degree[k] += F.shape[0]
