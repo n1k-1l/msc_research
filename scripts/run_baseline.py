@@ -83,16 +83,29 @@ def main() -> None:
     ap.add_argument("--results-dir", default="./results")
     ap.add_argument("--device", default=None,
                     help="force a device (cpu|cuda|mps); default = auto-detect")
-    ap.add_argument("--p", type=float, default=None,
-                    help="override p_base; suffixes the saved config name (e.g. _p30)")
+    ap.add_argument("--p", type=float, default=None, help="override p_base")
+    ap.add_argument("--alpha", type=float, default=None,
+                    help="override sigmoid sensitivity alpha")
+    ap.add_argument("--recompute-every", type=int, default=None,
+                    help="override recompute interval Delta")
     args = ap.parse_args()
 
     cfg = get_config(args.config)
+    # Hyperparameter-sweep overrides: each provided value overrides the config and
+    # adds a suffix to the saved name (e.g. _p30_a4_d10) so every grid point is a
+    # distinct config in the results dir / analysis.
+    overrides, suffix = {}, ""
     if args.p is not None:
-        # p_base sweep: override the budget and rename so each grid point writes
-        # distinct files and is a distinct config in the analysis.
-        cfg = dataclasses.replace(cfg, p=args.p,
-                                  name=f"{cfg.name}_p{round(args.p * 100):02d}")
+        overrides["p"] = args.p
+        suffix += f"_p{round(args.p * 100):02d}"
+    if args.alpha is not None:
+        overrides["alpha"] = args.alpha
+        suffix += f"_a{args.alpha:g}"
+    if args.recompute_every is not None:
+        overrides["recompute_every"] = args.recompute_every
+        suffix += f"_d{args.recompute_every}"
+    if overrides:
+        cfg = dataclasses.replace(cfg, name=cfg.name + suffix, **overrides)
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
