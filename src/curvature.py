@@ -125,23 +125,25 @@ def per_neuron_curvature(weights: List[torch.Tensor]) -> List[torch.Tensor]:
 
 @torch.no_grad()
 def weight_magnitude(weights: List[torch.Tensor]) -> List[torch.Tensor]:
-    """Per-neuron mean absolute incident weight (weight-magnitude control).
+    """Per-neuron L2 norm of incident weights (weight-magnitude control).
 
-    A non-geometric comparator: drives dropout from mean |w| per neuron instead
-    of curvature, to test whether the Forman signal adds anything beyond raw
-    magnitude (proposal section 4). Same per-layer layout as per_neuron_curvature.
+    This is the unit-ranking statistic of Targeted Dropout (Gomez et al. 2019):
+    units are ranked by the L2 norm of their weights and the smallest are the
+    prunable ones. As in per_neuron_curvature, a hidden neuron's incident weights
+    span the two layer pairs it belongs to, so the norm is taken over both sides --
+    the *same* edge set curvature averages over -- which keeps the magnitude-vs-
+    curvature comparison on identical neighbourhoods. Targeted Dropout ranks within
+    each layer, where the degree is constant, so the L2 norm is left unnormalised
+    (dividing by degree would not change any within-layer ranking).
     """
-    A = [W.abs() for W in weights]
-    sizes = [A[0].shape[1]] + [a.shape[0] for a in A]
-    dev, dtype = A[0].device, A[0].dtype
-    total = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
-    degree = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
-    for k, a in enumerate(A):
-        total[k] += a.sum(dim=0)
-        total[k + 1] += a.sum(dim=1)
-        degree[k] += a.shape[0]
-        degree[k + 1] += a.shape[1]
-    return [t / d for t, d in zip(total, degree)]
+    sizes = [weights[0].shape[1]] + [W.shape[0] for W in weights]
+    dev, dtype = weights[0].device, weights[0].dtype
+    sq = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
+    for k, W in enumerate(weights):
+        w2 = W * W
+        sq[k] += w2.sum(dim=0)          # source side (layer k)
+        sq[k + 1] += w2.sum(dim=1)      # target side (layer k+1)
+    return [s.sqrt() for s in sq]
 
 
 @torch.no_grad()
@@ -213,6 +215,73 @@ def clamped_fraction(probs: torch.Tensor) -> float:
     return float((probs >= _P_MAX).float().mean().item())
 
 
+@torch.no_grad()
+def scores_to_targeted_probs(
+    scores: torch.Tensor,
+    gamma: float,
+    drop: float,
+    direction: str = "low",
+) -> torch.Tensor:
+    """Targeted-Dropout mask as a per-neuron drop-probability vector.
+
+    Targeted Dropout (Gomez et al. 2019) selects the gamma fraction of units at the
+    *prunable* end of a ranking and drops each of them with probability `drop`,
+    leaving the rest untouched, so the network learns to be robust to pruning that
+    set. That is exactly a per-neuron probability vector ({drop on the targeted
+    units, 0 elsewhere}), so it feeds PerNeuronDropout.set_probs unchanged and
+    reuses the whole hook -- magnitude-TD and curvature-TD then differ only in the
+    score source and which end is prunable.
+
+    direction="low" targets the lowest-scoring units (weight magnitude: small |w| =
+    prunable, the vanilla TD criterion); "high" targets the highest (Forman
+    curvature: positive curvature = redundant = prunable). The criterion is a pure
+    ranking -- no differentiability, no standardisation needed.
+    """
+    n = scores.numel()
+    n_target = int(round(gamma * n))
+    probs = torch.zeros_like(scores)
+    if n_target <= 0:
+        return probs
+    if direction not in ("low", "high"):
+        raise ValueError(f"direction must be 'low' or 'high', got {direction!r}")
+    idx = torch.topk(scores, n_target, largest=(direction == "high")).indices
+    probs[idx] = float(drop)
+    return probs.clamp(0.0, _P_MAX)
+
+
+def _pearson(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Pearson (linear) correlation of two vectors, pure torch."""
+    if a.numel() < 2:
+        return float("nan")
+    a = a.float() - a.float().mean()
+    b = b.float() - b.float().mean()
+    denom = a.norm() * b.norm()
+    if denom == 0:
+        return float("nan")
+    return float((a @ b) / denom)
+
+
+def _spearman(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Spearman rank correlation (Pearson on ranks), pure torch.
+
+    Logged each recompute to track how different the curvature and magnitude
+    orderings are as training proceeds: ~1 means curvature is a magnitude statistic
+    here (explains a null); < 1 means it carries extra (neighbourhood) information.
+    Reported alongside _pearson: Spearman captures the rank/monotone relationship
+    that decides which units TD prunes; Pearson captures linear strength.
+    """
+    if a.numel() < 2:
+        return float("nan")
+    ra = a.argsort().argsort().float()
+    rb = b.argsort().argsort().float()
+    ra = ra - ra.mean()
+    rb = rb - rb.mean()
+    denom = ra.norm() * rb.norm()
+    if denom == 0:
+        return float("nan")
+    return float((ra @ rb) / denom)
+
+
 def _layer_stats(scores: torch.Tensor, probs: torch.Tensor) -> Dict[str, float]:
     return {
         "score_min": float(scores.min()),
@@ -268,6 +337,10 @@ class DropoutProbHook:
         standardize: bool = False,
         source: ScoreFn = per_neuron_curvature,
         record: bool = True,
+        mapping: str = "sigmoid",
+        gamma: float = 0.5,
+        drop: float = 0.5,
+        direction: str = "low",
     ):
         self.p_base = p_base
         self.alpha = alpha
@@ -277,6 +350,13 @@ class DropoutProbHook:
         self.standardize = standardize
         self.source = source
         self.record = record
+        # mapping=="targeted" -> Targeted-Dropout mask (scores_to_targeted_probs),
+        # using gamma/drop/direction; otherwise the Eq. 4 sigmoid (scores_to_probs),
+        # using alpha/beta/standardize.
+        self.mapping = mapping
+        self.gamma = gamma
+        self.drop = drop
+        self.direction = direction
         self.log: List[Dict[str, Any]] = []
 
     def _should_recompute(self, epoch: int) -> bool:
@@ -309,19 +389,37 @@ class DropoutProbHook:
             f"hidden layer; got {len(drops)} dropouts for {len(linears)} linear "
             "layers")
 
-        scores = self.source([lin.weight for lin in linears])
+        weights = [lin.weight for lin in linears]
+        scores = self.source(weights)
         n_hidden = len(drops)
+        # Diagnostic: how different are the curvature and magnitude orderings as
+        # training proceeds -- the key read on whether curvature is more than a
+        # magnitude statistic here. Cheap (about two forward-pass-cost passes).
+        diag = (per_neuron_curvature(weights), weight_magnitude(weights)) \
+            if self.record else None
         layer_log: List[Dict[str, float]] = []
-        for k, drop in enumerate(drops):
-            # drop k follows linears[k], whose output is hidden layer (k + 1).
+        for k, dmod in enumerate(drops):
+            # dmod k follows linears[k], whose output is hidden layer (k + 1).
             score = scores[k + 1]
-            alpha_k = self._resolve(self.alpha, k, n_hidden, "alpha")
-            beta_k = self._resolve(self.beta, k, n_hidden, "beta")
-            probs = scores_to_probs(score, self.p_base, alpha_k, beta_k,
-                                    standardize=self.standardize)
-            drop.set_probs(probs)
+            if self.mapping == "targeted":
+                probs = scores_to_targeted_probs(score, self.gamma, self.drop,
+                                                 direction=self.direction)
+            else:
+                alpha_k = self._resolve(self.alpha, k, n_hidden, "alpha")
+                beta_k = self._resolve(self.beta, k, n_hidden, "beta")
+                probs = scores_to_probs(score, self.p_base, alpha_k, beta_k,
+                                        standardize=self.standardize)
+            dmod.set_probs(probs)
             if self.record:
-                layer_log.append(_layer_stats(score, probs))
+                curv_k, mag_k = diag[0][k + 1], diag[1][k + 1]
+                stats = _layer_stats(score, probs)
+                stats["spearman_curv_mag"] = _spearman(curv_k, mag_k)
+                stats["pearson_curv_mag"] = _pearson(curv_k, mag_k)
+                # Raw per-neuron arrays so curvature-vs-magnitude scatter plots can
+                # be drawn at each checkpoint (curv = Forman kappa, mag = L2 norm).
+                stats["curv"] = curv_k.cpu().tolist()
+                stats["mag"] = mag_k.cpu().tolist()
+                layer_log.append(stats)
 
         if self.record:
             self.log.append({"epoch": epoch, "layers": layer_log})
@@ -336,7 +434,12 @@ def make_dropout_prob_hook(
     standardize: bool = False,
     source: ScoreFn = per_neuron_curvature,
     record: bool = True,
+    mapping: str = "sigmoid",
+    gamma: float = 0.5,
+    drop: float = 0.5,
+    direction: str = "low",
 ) -> DropoutProbHook:
     """Build a DropoutProbHook. See DropoutProbHook for the arguments."""
     return DropoutProbHook(p_base, alpha, beta, warmup_epochs, recompute_every,
-                           standardize=standardize, source=source, record=record)
+                           standardize=standardize, source=source, record=record,
+                           mapping=mapping, gamma=gamma, drop=drop, direction=direction)

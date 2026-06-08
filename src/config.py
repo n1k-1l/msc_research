@@ -37,6 +37,15 @@ class ExpConfig:
     beta: Union[float, List[float]] = 0.0    # sigmoid offset (scalar or per hidden layer)
     standardize: bool = True                 # z-score each layer's signal before the sigmoid
     prob_source: Optional[str] = None        # None (static) | "forman" | "magnitude" | "random"
+    # Targeted Dropout (Gomez et al. 2019): drop the target_gamma fraction of units
+    # at the prunable end of the score with prob target_drop each step, so the net
+    # is robust to post-hoc pruning. prob_mapping="targeted" uses this hard mask
+    # instead of the Eq. 4 sigmoid; magnitude-TD vs curvature-TD then differ only in
+    # prob_source and target_direction. Evaluated on accuracy-vs-sparsity.
+    prob_mapping: str = "sigmoid"            # "sigmoid" (curvature-dropout) | "targeted" (Targeted Dropout)
+    target_gamma: float = 0.5                # fraction of units targeted (gamma)
+    target_drop: float = 0.5                 # drop probability for targeted units (alpha)
+    target_direction: str = "low"            # "low" (small=prunable: magnitude) | "high" (large=prunable: curvature)
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -97,7 +106,35 @@ def _baselines() -> Dict[str, ExpConfig]:
     return cfgs
 
 
-REGISTRY: Dict[str, ExpConfig] = _baselines()
+def _targeted_dropout_configs() -> Dict[str, ExpConfig]:
+    """Curvature as the Targeted-Dropout criterion vs the magnitude baseline.
+
+    Faithful Targeted Dropout (hard bottom/top-gamma mask + stochastic drop) on the
+    small MNIST MLP, evaluated on pruning robustness (accuracy-vs-sparsity; see
+    run_baseline.py -> prune_curve), which is the right metric for TD. Three arms
+    differing only in the score source and which end of it is "prunable":
+      td_magnitude - rank units by |w| (L2 norm), drop the lowest (vanilla TD).
+      td_forman    - rank by Forman curvature, drop the highest (positive=redundant).
+      td_random    - random scores (control: is any structure better than none?).
+    gamma / drop are untuned starting points (tune on validation).
+    """
+    common = dict(dataset="mnist", widths=MNIST_SMALL, dropout_kind="per_neuron",
+                  p=0.0, epochs=40, warmup_epochs=5, recompute_every=5,
+                  prob_mapping="targeted", target_gamma=0.5, target_drop=0.5)
+    return {
+        "mnist_small_td_magnitude": ExpConfig(
+            name="mnist_small_td_magnitude", prob_source="magnitude",
+            target_direction="low", **common),
+        "mnist_small_td_forman": ExpConfig(
+            name="mnist_small_td_forman", prob_source="forman",
+            target_direction="high", **common),
+        "mnist_small_td_random": ExpConfig(
+            name="mnist_small_td_random", prob_source="random",
+            target_direction="low", **common),
+    }
+
+
+REGISTRY: Dict[str, ExpConfig] = {**_baselines(), **_targeted_dropout_configs()}
 
 
 def get_config(name: str) -> ExpConfig:

@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import get_config
 from src.curvature import make_dropout_prob_hook, get_source
 from src.data import get_data
+from src.prune_eval import prune_and_evaluate
 from src.metrics import summarize_config
 from src.models import MLP
 from src.train import train
@@ -29,14 +30,14 @@ from src.utils import set_seed, get_device
 
 
 def run_one(cfg, seed: int, data_root: str, results_dir: Path,
-            device: "torch.device | None" = None) -> dict:
+            device: "torch.device | None" = None, num_workers: int = 2) -> dict:
     print(f"\n=== {cfg.name} | seed {seed} ===")
     set_seed(seed)
     device = device if device is not None else get_device()
 
     data = get_data(cfg.dataset, data_root=data_root,
                     batch_size=cfg.batch_size, val_fraction=cfg.val_fraction,
-                    seed=seed)
+                    num_workers=num_workers, seed=seed)
     model = MLP(widths=cfg.widths, dropout_kind=cfg.dropout_kind,
                 p=cfg.p, activation=cfg.activation)
     print(f"  params: {model.num_parameters():,} | device: {device}")
@@ -49,7 +50,9 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
             p_base=cfg.p, alpha=cfg.alpha, beta=cfg.beta,
             warmup_epochs=cfg.warmup_epochs, recompute_every=cfg.recompute_every,
             standardize=cfg.standardize,
-            source=get_source(cfg.prob_source))
+            source=get_source(cfg.prob_source),
+            mapping=cfg.prob_mapping, gamma=cfg.target_gamma,
+            drop=cfg.target_drop, direction=cfg.target_direction)
 
     record = {**cfg.to_dict(), "seed": seed}
     result = train(model, data.train, data.val, data.test, device,
@@ -69,6 +72,14 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
     # Curvature distribution evolution (proposal secondary metric); append-only.
     if hook is not None:
         out["curvature_log"] = hook.log
+    # Pruning robustness (accuracy-vs-sparsity): for Targeted-Dropout configs, prune
+    # the most-prunable units by the same score/direction used in training and
+    # re-evaluate. train() leaves `model` holding the best-val checkpoint.
+    if cfg.prob_mapping == "targeted" and cfg.prob_source is not None:
+        out["prune_curve"] = prune_and_evaluate(
+            model, get_source(cfg.prob_source), cfg.target_direction,
+            sparsities=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+            loader=data.test, device=device)
     path = results_dir / f"{cfg.name}_seed{seed}.json"
     path.write_text(json.dumps(out, indent=2))
     print(f"  saved -> {path}")
@@ -83,6 +94,8 @@ def main() -> None:
     ap.add_argument("--results-dir", default="./results")
     ap.add_argument("--device", default=None,
                     help="force a device (cpu|cuda|mps); default = auto-detect")
+    ap.add_argument("--num-workers", type=int, default=2,
+                    help="DataLoader workers; use 0 on macOS+MPS (worker/MPS deadlock)")
     ap.add_argument("--p", type=float, default=None, help="override p_base")
     ap.add_argument("--alpha", type=float, default=None,
                     help="override sigmoid sensitivity alpha")
@@ -111,7 +124,8 @@ def main() -> None:
 
     import torch
     device = torch.device(args.device) if args.device else None
-    runs = [run_one(cfg, s, args.data_root, results_dir, device) for s in args.seeds]
+    runs = [run_one(cfg, s, args.data_root, results_dir, device, args.num_workers)
+            for s in args.seeds]
 
     # Metric families computed by the shared metrics module so the summary
     # always agrees with the analysis report.
