@@ -250,7 +250,14 @@ def scores_to_targeted_probs(
 
 
 def _pearson(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Pearson (linear) correlation of two vectors, pure torch."""
+    """Pearson (linear) correlation rho of two vectors, pure torch.
+
+    Logged each recompute as `pearson_curv_mag` to track how tightly curvature and
+    magnitude are coupled as training proceeds: |rho| ~ 1 means curvature has
+    collapsed to ~a function of weight magnitude here (explains the null -- the two
+    Targeted-Dropout criteria then rank units the same way); smaller |rho| means
+    curvature carries extra (neighbourhood) information.
+    """
     if a.numel() < 2:
         return float("nan")
     a = a.float() - a.float().mean()
@@ -259,27 +266,6 @@ def _pearson(a: torch.Tensor, b: torch.Tensor) -> float:
     if denom == 0:
         return float("nan")
     return float((a @ b) / denom)
-
-
-def _spearman(a: torch.Tensor, b: torch.Tensor) -> float:
-    """Spearman rank correlation (Pearson on ranks), pure torch.
-
-    Logged each recompute to track how different the curvature and magnitude
-    orderings are as training proceeds: ~1 means curvature is a magnitude statistic
-    here (explains a null); < 1 means it carries extra (neighbourhood) information.
-    Reported alongside _pearson: Spearman captures the rank/monotone relationship
-    that decides which units TD prunes; Pearson captures linear strength.
-    """
-    if a.numel() < 2:
-        return float("nan")
-    ra = a.argsort().argsort().float()
-    rb = b.argsort().argsort().float()
-    ra = ra - ra.mean()
-    rb = rb - rb.mean()
-    denom = ra.norm() * rb.norm()
-    if denom == 0:
-        return float("nan")
-    return float((ra @ rb) / denom)
 
 
 def _layer_stats(scores: torch.Tensor, probs: torch.Tensor) -> Dict[str, float]:
@@ -413,7 +399,6 @@ class DropoutProbHook:
             if self.record:
                 curv_k, mag_k = diag[0][k + 1], diag[1][k + 1]
                 stats = _layer_stats(score, probs)
-                stats["spearman_curv_mag"] = _spearman(curv_k, mag_k)
                 stats["pearson_curv_mag"] = _pearson(curv_k, mag_k)
                 # Raw per-neuron arrays so curvature-vs-magnitude scatter plots can
                 # be drawn at each checkpoint (curv = Forman kappa, mag = L2 norm).

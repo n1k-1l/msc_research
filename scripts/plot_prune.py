@@ -4,9 +4,9 @@ Plot pruning-robustness (accuracy-vs-sparsity) for Targeted-Dropout configs.
 
 Reads a results dir, groups the per-seed `prune_curve` fields by config, and
 overlays the mean +/- std curve for each criterion (forman / magnitude / random).
-Also reports the mean `spearman_curv_mag` (curvature-vs-magnitude rank
-correlation) per config -- the diagnostic for how different the two orderings
-are, i.e. whether curvature is more than a magnitude statistic here.
+Also reports the mean `pearson_curv_mag` (curvature-vs-magnitude correlation rho)
+per config -- the diagnostic for how tightly the two are coupled, i.e. whether
+curvature is more than a magnitude statistic here.
 
     python scripts/plot_prune.py --results-dir results_td
 """
@@ -29,7 +29,7 @@ def main() -> None:
     rdir = Path(args.results_dir)
 
     curves: dict[str, list] = defaultdict(list)   # config -> [prune_curve per seed]
-    spear: dict[str, list] = defaultdict(list)    # config -> [mean spearman per seed]
+    spear: dict[str, list] = defaultdict(list)    # config -> [mean rho per seed]
     for f in sorted(rdir.glob("*_seed*.json")):
         d = json.loads(f.read_text())
         name = d["config"]["name"]
@@ -37,8 +37,8 @@ def main() -> None:
             curves[name].append(d["prune_curve"])
         log = d.get("curvature_log") or []
         if log:
-            vals = [l["spearman_curv_mag"] for l in log[-1]["layers"]
-                    if "spearman_curv_mag" in l]
+            vals = [l["pearson_curv_mag"] for l in log[-1]["layers"]
+                    if "pearson_curv_mag" in l]
             if vals:
                 spear[name].append(float(np.mean(vals)))
 
@@ -57,7 +57,7 @@ def main() -> None:
         sp = np.mean(spear[name]) if spear.get(name) else float("nan")
         plt.plot(spars, mean, marker="o", label=f"{label} (rho={sp:.2f})")
         plt.fill_between(spars, mean - std, mean + std, alpha=0.2)
-        print(f"\n  {name}  (spearman curv~mag = {sp:.3f}, n={accs.shape[0]} seeds)")
+        print(f"\n  {name}  (pearson curv~mag rho = {sp:.3f}, n={accs.shape[0]} seeds)")
         for i, s in enumerate(spars):
             print(f"    sparsity {s:.1f}: {mean[i]:.4f} +/- {std[i]:.4f}")
 
