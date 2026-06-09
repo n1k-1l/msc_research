@@ -118,8 +118,13 @@ def _targeted_dropout_configs() -> Dict[str, ExpConfig]:
       td_random    - random scores (control: is any structure better than none?).
     gamma / drop are untuned starting points (tune on validation).
     """
+    # Schedule follows standard Targeted Dropout (Gomez et al. 2019): no warm-up
+    # (fixed gamma from the start) and the targeted set re-ranked every epoch
+    # (the paper re-ranks every minibatch; once-per-epoch is the closest the epoch
+    # hook allows -- noted as a faithfulness approximation). gamma/drop are in the
+    # paper's tested range; gamma=0.5 trains robustness to dropping the bottom 50%.
     common = dict(dataset="mnist", widths=MNIST_SMALL, dropout_kind="per_neuron",
-                  p=0.0, epochs=40, warmup_epochs=5, recompute_every=5,
+                  p=0.0, epochs=40, warmup_epochs=0, recompute_every=1,
                   prob_mapping="targeted", target_gamma=0.5, target_drop=0.5)
     return {
         "mnist_small_td_magnitude": ExpConfig(
