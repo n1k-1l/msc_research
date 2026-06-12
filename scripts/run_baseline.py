@@ -101,6 +101,8 @@ def main() -> None:
                     help="override sigmoid sensitivity alpha")
     ap.add_argument("--recompute-every", type=int, default=None,
                     help="override recompute interval Delta")
+    ap.add_argument("--target-gamma", type=float, default=None,
+                    help="override Targeted-Dropout targeting fraction gamma")
     args = ap.parse_args()
 
     cfg = get_config(args.config)
@@ -117,6 +119,9 @@ def main() -> None:
     if args.recompute_every is not None:
         overrides["recompute_every"] = args.recompute_every
         suffix += f"_d{args.recompute_every}"
+    if args.target_gamma is not None:
+        overrides["target_gamma"] = args.target_gamma
+        suffix += f"_g{round(args.target_gamma * 100):02d}"
     if overrides:
         cfg = dataclasses.replace(cfg, name=cfg.name + suffix, **overrides)
     results_dir = Path(args.results_dir)
