@@ -46,6 +46,8 @@ def main() -> None:
         print(f"no prune_curve data found in {rdir}")
         return
 
+    # Shared poster palette: same criterion = same colour across every figure.
+    col = {"forman": "#1f77b4", "magnitude": "#ff7f0e", "random": "#7f7f7f"}
     plt.figure(figsize=(7, 5))
     print(f"\nPruning robustness ({rdir}):")
     for name in sorted(curves):
@@ -55,8 +57,9 @@ def main() -> None:
         mean, std = accs.mean(0), accs.std(0)
         label = name.replace("mnist_small_td_", "")
         sp = np.mean(spear[name]) if spear.get(name) else float("nan")
-        plt.plot(spars, mean, marker="o", label=f"{label} (rho={sp:.2f})")
-        plt.fill_between(spars, mean - std, mean + std, alpha=0.2)
+        c = col.get(label)
+        plt.plot(spars, mean, marker="o", color=c, label=f"{label} (rho={sp:.2f})")
+        plt.fill_between(spars, mean - std, mean + std, alpha=0.2, color=c)
         print(f"\n  {name}  (pearson curv~mag rho = {sp:.3f}, n={accs.shape[0]} seeds)")
         for i, s in enumerate(spars):
             print(f"    sparsity {s:.1f}: {mean[i]:.4f} +/- {std[i]:.4f}")
