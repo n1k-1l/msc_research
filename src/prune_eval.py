@@ -19,8 +19,19 @@ import copy
 import torch
 import torch.nn as nn
 
-from .curvature import ScoreFn
+from .curvature import ScoreFn, get_source
 from .train import evaluate
+
+# Criterion set for unconfounded cross-pruning: prune the SAME trained model by
+# each and compare. (label, score source, prunable direction). Curvature prunes
+# the highest (positive = redundant), magnitude the lowest (small |w|), random is
+# the control. Used to compare criteria on a network that was NOT trained to
+# favour any of them (e.g. a uniform-dropout / no-dropout net).
+CROSS_PRUNE_CRITERIA = [
+    ("forman", "forman", "high"),
+    ("magnitude", "magnitude", "low"),
+    ("random", "random", "low"),
+]
 
 
 @torch.no_grad()
@@ -58,3 +69,23 @@ def prune_and_evaluate(
         curve.append({"sparsity": float(s),
                       "test_acc": float(evaluate(pruned, loader, device))})
     return curve
+
+
+@torch.no_grad()
+def prune_by_criteria(
+    model: nn.Module,
+    sparsities: Sequence[float],
+    loader,
+    device: torch.device,
+    criteria=CROSS_PRUNE_CRITERIA,
+) -> Dict[str, List[Dict[str, float]]]:
+    """Prune the SAME trained model by each criterion; return {label: prune_curve}.
+
+    The point is an unconfounded criterion comparison: applied to one fixed network
+    (ideally one not trained to favour any criterion), does Forman curvature prune
+    more gracefully than weight magnitude? Each criterion ranks the trained weights
+    independently, so the curves are directly comparable on identical weights.
+    """
+    return {label: prune_and_evaluate(model, get_source(src), direction,
+                                      sparsities, loader, device)
+            for label, src, direction in criteria}

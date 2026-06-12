@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import get_config
 from src.curvature import make_dropout_prob_hook, get_source
 from src.data import get_data
-from src.prune_eval import prune_and_evaluate
+from src.prune_eval import prune_and_evaluate, prune_by_criteria
 from src.metrics import summarize_config
 from src.models import MLP
 from src.train import train
@@ -30,7 +30,8 @@ from src.utils import set_seed, get_device
 
 
 def run_one(cfg, seed: int, data_root: str, results_dir: Path,
-            device: "torch.device | None" = None, num_workers: int = 2) -> dict:
+            device: "torch.device | None" = None, num_workers: int = 2,
+            cross_prune: bool = False) -> dict:
     print(f"\n=== {cfg.name} | seed {seed} ===")
     set_seed(seed)
     device = device if device is not None else get_device()
@@ -75,11 +76,18 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
     # Pruning robustness (accuracy-vs-sparsity): for Targeted-Dropout configs, prune
     # the most-prunable units by the same score/direction used in training and
     # re-evaluate. train() leaves `model` holding the best-val checkpoint.
+    sparsities = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     if cfg.prob_mapping == "targeted" and cfg.prob_source is not None:
         out["prune_curve"] = prune_and_evaluate(
             model, get_source(cfg.prob_source), cfg.target_direction,
-            sparsities=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-            loader=data.test, device=device)
+            sparsities=sparsities, loader=data.test, device=device)
+    # Unconfounded criterion comparison (--cross-prune): prune this one trained
+    # model by forman / magnitude / random and store each curve. On a neutral net
+    # (uniform / no dropout) this isolates the pruning criterion from any training
+    # bias toward it. Works for any config, append-only field.
+    if cross_prune:
+        out["prune_curves_by_criterion"] = prune_by_criteria(
+            model, sparsities=sparsities, loader=data.test, device=device)
     path = results_dir / f"{cfg.name}_seed{seed}.json"
     path.write_text(json.dumps(out, indent=2))
     print(f"  saved -> {path}")
@@ -103,6 +111,9 @@ def main() -> None:
                     help="override recompute interval Delta")
     ap.add_argument("--target-gamma", type=float, default=None,
                     help="override Targeted-Dropout targeting fraction gamma")
+    ap.add_argument("--cross-prune", action="store_true",
+                    help="also prune the trained model by forman/magnitude/random "
+                         "and store each curve (unconfounded criterion comparison)")
     args = ap.parse_args()
 
     cfg = get_config(args.config)
@@ -129,7 +140,8 @@ def main() -> None:
 
     import torch
     device = torch.device(args.device) if args.device else None
-    runs = [run_one(cfg, s, args.data_root, results_dir, device, args.num_workers)
+    runs = [run_one(cfg, s, args.data_root, results_dir, device, args.num_workers,
+                    cross_prune=args.cross_prune)
             for s in args.seeds]
 
     # Metric families computed by the shared metrics module so the summary
