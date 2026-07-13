@@ -74,7 +74,8 @@ def main() -> None:
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     out = rdir / f"{args.config}_concordance.png"
     fig.savefig(out, dpi=130, bbox_inches="tight")
-    print(f"saved -> {out}")
+    fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")  # vector copy (thesis)
+    print(f"saved -> {out} (+.pdf)")
 
 
 if __name__ == "__main__":

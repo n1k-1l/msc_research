@@ -81,3 +81,42 @@ class MLP(nn.Module):
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class LeNet(nn.Module):
+    """LeNet-5-style CNN (the first CNN target for the curvature-vs-magnitude study).
+
+    A conv layer is not a bipartite weight graph like a Linear, so for curvature we
+    view each conv as a *channel graph*: the edge between in-channel j and out-channel
+    i carries the L2 norm of the kernel slice W[i, j, :, :] (see src/cnn_prune.py).
+    The model just needs to expose its Conv2d/Linear layers in forward order.
+
+    Defaults size for 28x28 MNIST: conv(5x5) 1->6 -> pool -> conv(5x5) 6->16 -> pool
+    -> 16*4*4=256 -> 120 -> 84 -> num_classes.
+    """
+    def __init__(self, num_classes: int = 10, in_ch: int = 1,
+                 activation: str = "relu"):
+        super().__init__()
+        act_cls = {"relu": nn.ReLU, "gelu": nn.GELU}[activation.lower()]
+        self.features = nn.Sequential(
+            nn.Conv2d(in_ch, 6, kernel_size=5), act_cls(), nn.MaxPool2d(2),
+            nn.Conv2d(6, 16, kernel_size=5), act_cls(), nn.MaxPool2d(2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(16 * 4 * 4, 120), act_cls(),
+            nn.Linear(120, 84), act_cls(),
+            nn.Linear(84, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.features(x))
+
+    def conv_layers(self) -> List[nn.Conv2d]:
+        return [m for m in self.modules() if isinstance(m, nn.Conv2d)]
+
+    def linear_layers(self) -> List[nn.Linear]:
+        return [m for m in self.modules() if isinstance(m, nn.Linear)]
+
+    def num_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)

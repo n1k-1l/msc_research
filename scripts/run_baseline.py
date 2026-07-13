@@ -23,6 +23,7 @@ from src.config import get_config
 from src.curvature import make_dropout_prob_hook, get_source
 from src.data import get_data
 from src.prune_eval import prune_and_evaluate, prune_by_criteria
+from src.iterative_prune import iterative_prune_by_criteria, CRITERIA
 from src.metrics import summarize_config
 from src.models import MLP
 from src.train import train
@@ -39,8 +40,12 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
     data = get_data(cfg.dataset, data_root=data_root,
                     batch_size=cfg.batch_size, val_fraction=cfg.val_fraction,
                     num_workers=num_workers, seed=seed)
-    model = MLP(widths=cfg.widths, dropout_kind=cfg.dropout_kind,
-                p=cfg.p, activation=cfg.activation)
+    if getattr(cfg, "arch", "mlp") == "lenet":
+        from src.models import LeNet
+        model = LeNet(num_classes=cfg.widths[-1], activation=cfg.activation)
+    else:
+        model = MLP(widths=cfg.widths, dropout_kind=cfg.dropout_kind,
+                    p=cfg.p, activation=cfg.activation)
     print(f"  params: {model.num_parameters():,} | device: {device}")
 
     # Hook-driven per-neuron dropout (curvature method and its controls) is added
@@ -55,10 +60,21 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
             mapping=cfg.prob_mapping, gamma=cfg.target_gamma,
             drop=cfg.target_drop, direction=cfg.target_direction)
 
+    # Sparse-by-construction topology: a fixed random mask per layer, seeded per run,
+    # held through training (weight_masks) and used as the starting point for pruning.
+    sparse_masks = None
+    if getattr(cfg, "sparse_init", False):
+        import torch as _torch
+        from src.iterative_prune import make_sparse_masks
+        gen = _torch.Generator().manual_seed(seed)
+        sparse_masks = make_sparse_masks(model.linear_layers(), cfg.sparse_density, gen)
+        dens = [round(float(m.float().mean()), 3) for m in sparse_masks]
+        print(f"  sparse topology densities: {dens}")
+
     record = {**cfg.to_dict(), "seed": seed}
     result = train(model, data.train, data.val, data.test, device,
                    epochs=cfg.epochs, lr=cfg.lr, weight_decay=cfg.weight_decay,
-                   config=record, epoch_hook=hook)
+                   config=record, epoch_hook=hook, weight_masks=sparse_masks)
 
     out = {
         "config": record,
@@ -88,6 +104,24 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
     if cross_prune:
         out["prune_curves_by_criterion"] = prune_by_criteria(
             model, sparsities=sparsities, loader=data.test, device=device)
+    # Iterative hard pruning: prune the trained dense net by each criterion with
+    # fine-tuning between rounds (the non-uniform-connectivity divergence test).
+    if getattr(cfg, "iterative_prune", False):
+        criteria = getattr(cfg, "prune_criteria", None) or CRITERIA
+        if getattr(cfg, "arch", "mlp") == "lenet":
+            from src.cnn_prune import cnn_prune_by_criteria
+            out["iterative_prune_curves"] = cnn_prune_by_criteria(
+                model, loaders=(data.train, data.val, data.test), device=device,
+                schedule=cfg.prune_schedule, finetune_epochs=cfg.finetune_epochs,
+                lr=cfg.lr, criteria=criteria,
+                calib_batches=getattr(cfg, "calib_batches", 2))
+        else:
+            out["iterative_prune_curves"] = iterative_prune_by_criteria(
+                model, loaders=(data.train, data.val, data.test), device=device,
+                schedule=cfg.prune_schedule, finetune_epochs=cfg.finetune_epochs,
+                lr=cfg.lr, granularity=cfg.prune_granularity,
+                criteria=criteria, init_masks=sparse_masks,
+                calib_batches=getattr(cfg, "calib_batches", 2))
     path = results_dir / f"{cfg.name}_seed{seed}.json"
     path.write_text(json.dumps(out, indent=2))
     print(f"  saved -> {path}")

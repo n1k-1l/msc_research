@@ -15,7 +15,7 @@ only thing that varies between runs. Two design points:
 """
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-from typing import Callable, Optional, List, Dict, Any
+from typing import Callable, Optional, List, Dict, Any, Sequence
 import time
 import torch
 import torch.nn as nn
@@ -67,6 +67,7 @@ def train(
     weight_decay: float = 0.0,
     config: Optional[Dict[str, Any]] = None,
     epoch_hook: Optional[Callable[[nn.Module, int], None]] = None,
+    weight_masks: Optional[Sequence[torch.Tensor]] = None,
     verbose: bool = True,
 ) -> RunResult:
     """
@@ -74,6 +75,11 @@ def train(
 
     epoch_hook(model, epoch) is called after each epoch; pass None for the
     baselines (see the module docstring).
+
+    weight_masks (optional): one bool mask per Linear (in forward order). When given,
+    the network is trained *sparse* -- pruned weights are held at zero via a gradient
+    mask plus a post-step re-zero, so a fixed sparse-by-construction topology is
+    preserved throughout training. None = ordinary dense training.
 
     The test set is evaluated once, at the end, on the best-validation
     checkpoint, and is never used for tuning. The train set is also evaluated
@@ -85,6 +91,18 @@ def train(
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.CrossEntropyLoss()
+
+    # Fixed sparse topology: freeze pruned weights at zero (grad mask + post-step zero).
+    masked_linears = None
+    if weight_masks is not None:
+        masked_linears = model.linear_layers()
+        assert len(masked_linears) == len(weight_masks), (
+            f"{len(weight_masks)} masks for {len(masked_linears)} Linear layers")
+        weight_masks = [m.to(device) for m in weight_masks]
+        for lin, m in zip(masked_linears, weight_masks):
+            lin.weight.register_hook(lambda g, m=m: g * m)
+            with torch.no_grad():
+                lin.weight.mul_(m)
 
     result = RunResult(config=config or {})
     best_state = None
@@ -102,6 +120,10 @@ def train(
             loss = loss_fn(logits, y)
             loss.backward()
             opt.step()
+            if masked_linears is not None:
+                with torch.no_grad():
+                    for lin, m in zip(masked_linears, weight_masks):
+                        lin.weight.mul_(m)
 
             running_loss += loss.item() * y.numel()
             correct += (logits.argmax(dim=1) == y).sum().item()

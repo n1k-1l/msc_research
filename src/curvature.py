@@ -93,6 +93,64 @@ def forman_edges(A: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
 
 
 @torch.no_grad()
+def forman_edges_masked(A: torch.Tensor, mask: torch.Tensor,
+                        eps: float = 1e-12) -> torch.Tensor:
+    """Forman-Ricci curvature per edge with a boolean edge-presence mask.
+
+    Unstructured pruning removes individual edges, so a vertex's *effective degree*
+    is its number of surviving incident edges. Masked-out edges must therefore
+    contribute nothing to the vertex strengths S(u), S(v) (as opposed to
+    forman_edges, which clamps a zero weight to eps and so would treat a pruned
+    edge as a huge 1/sqrt(w) term). The constant 4 = 2(w_u + w_v) is independent of
+    degree and stays; degree enters only through the sums, so this reduces to
+    F = 4 - deg_present(u) - deg_present(v) in the unweighted masked case -- i.e.
+    the topological term now varies per vertex once the graph is non-uniform.
+
+    With an all-True mask this is identical to forman_edges. Pruned edges are
+    returned as NaN (their curvature is undefined); survivors carry finite values.
+
+    Args:
+        A: (n_tgt, n_src) absolute edge weights for one layer pair.
+        mask: bool tensor, same shape as A; True = edge present.
+    """
+    inv_sqrt = torch.where(mask, A.clamp_min(eps).rsqrt(), torch.zeros_like(A))
+    s_src = inv_sqrt.sum(dim=0, keepdim=True)   # S over surviving edges, (1, n_src)
+    s_tgt = inv_sqrt.sum(dim=1, keepdim=True)   # (n_tgt, 1)
+    F = 4.0 - A.sqrt() * (s_src + s_tgt)
+    return torch.where(mask, F, torch.full_like(F, float("nan")))
+
+
+@torch.no_grad()
+def per_neuron_curvature_masked(weights: List[torch.Tensor],
+                                masks: List[torch.Tensor]) -> List[torch.Tensor]:
+    """Per-neuron Forman curvature on a masked (unstructured-pruned) weight graph.
+
+    Like per_neuron_curvature, but each neuron averages over its *surviving*
+    incident edges only, using forman_edges_masked so effective degree tracks the
+    mask. Used by the unit-granularity iterative-pruning control (where whole
+    neurons, i.e. full rows/cols, are removed).
+
+    Args:
+        weights: ordered Linear weight tensors [W_1, ..., W_L].
+        masks: one bool mask per weight tensor (True = edge present).
+    """
+    A = [W.abs() for W in weights]
+    sizes = [A[0].shape[1]] + [a.shape[0] for a in A]
+    dev, dtype = A[0].device, A[0].dtype
+
+    kappa_sum = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
+    degree = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
+    for k, (a, m) in enumerate(zip(A, masks)):
+        F = forman_edges_masked(a, m)
+        F0 = torch.nan_to_num(F, nan=0.0)      # masked edges add nothing
+        kappa_sum[k] += F0.sum(dim=0)          # source side (layer k)
+        kappa_sum[k + 1] += F0.sum(dim=1)      # target side (layer k+1)
+        degree[k] += m.sum(dim=0)              # surviving incident edges
+        degree[k + 1] += m.sum(dim=1)
+    return [ks / d.clamp_min(1) for ks, d in zip(kappa_sum, degree)]
+
+
+@torch.no_grad()
 def per_neuron_curvature(weights: List[torch.Tensor]) -> List[torch.Tensor]:
     """Per-neuron Forman-Ricci curvature for every layer (Eq. 3).
 

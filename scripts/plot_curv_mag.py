@@ -99,7 +99,8 @@ def correlation_figure(logs: list[list[dict]], out: Path, title: str) -> None:
     fig.suptitle(title)
     fig.tight_layout(rect=(0, 0, 1, 0.985))
     fig.savefig(out, dpi=130, bbox_inches="tight")
-    print(f"saved -> {out}")
+    fig.savefig(Path(out).with_suffix(".pdf"), bbox_inches="tight")  # vector copy (thesis)
+    print(f"saved -> {out} (+.pdf)")
 
 
 def scatter_figure(logs: list[list[dict]], out: Path, title: str) -> None:
@@ -130,7 +131,8 @@ def scatter_figure(logs: list[list[dict]], out: Path, title: str) -> None:
     fig.suptitle(title)
     fig.tight_layout(rect=(0, 0, 1, 0.985))
     fig.savefig(out, dpi=130, bbox_inches="tight")
-    print(f"saved -> {out}")
+    fig.savefig(Path(out).with_suffix(".pdf"), bbox_inches="tight")  # vector copy (thesis)
+    print(f"saved -> {out} (+.pdf)")
 
 
 def main() -> None:

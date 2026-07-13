@@ -71,7 +71,8 @@ def main() -> None:
     plt.grid(alpha=0.3)
     out = rdir / "prune_curves.png"
     plt.savefig(out, dpi=130, bbox_inches="tight")
-    print(f"\nsaved -> {out}")
+    plt.savefig(out.with_suffix(".pdf"), bbox_inches="tight")  # vector copy (thesis)
+    print(f"\nsaved -> {out} (+.pdf)")
 
 
 if __name__ == "__main__":

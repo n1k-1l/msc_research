@@ -69,13 +69,13 @@ def main() -> None:
         ax.set_title(f"{cfg.replace('mnist_small_', '')}  (n = {n})")
         ax.grid(alpha=0.3)
         ax.legend()
-    fig.suptitle("Confounding control: a neutral net pruned by each criterion\n"
-                 "curvature shows no consistent advantage over magnitude  "
-                 "(* = significant paired diff, p<0.05; colour = better criterion)")
+    fig.suptitle("Neutral net pruned by each criterion\n"
+                 "(* = significant forman$-$magnitude difference, p<0.05)")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     out = Path(args.results_dir) / "neutral_prune.png"
     fig.savefig(out, dpi=130, bbox_inches="tight")
-    print(f"saved -> {out}")
+    fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")  # vector copy (thesis)
+    print(f"saved -> {out} (+.pdf)")
 
 
 if __name__ == "__main__":

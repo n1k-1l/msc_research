@@ -19,7 +19,8 @@ from typing import List, Dict, Any, Optional, Union
 class ExpConfig:
     name: str
     dataset: str                       # "mnist" | "cifar10"
-    widths: List[int]                  # full layer sizes incl. input/output
+    widths: List[int]                  # full layer sizes incl. input/output (MLP)
+    arch: str = "mlp"                  # "mlp" | "lenet" (CNN channel-graph pruning)
     dropout_kind: str = "uniform"      # "uniform" | "per_neuron" | "none"
     p: float = 0.5                     # base drop probability (p_base)
     epochs: int = 60
@@ -46,6 +47,26 @@ class ExpConfig:
     target_gamma: float = 0.5                # fraction of units targeted (gamma)
     target_drop: float = 0.5                 # drop probability for targeted units (alpha)
     target_direction: str = "low"            # "low" (small=prunable: magnitude) | "high" (large=prunable: curvature)
+    # Iterative hard pruning (train dense -> prune a fraction -> fine-tune -> repeat),
+    # to test whether curvature diverges from magnitude under NON-uniform connectivity.
+    # When iterative_prune is set, the trained dense net is pruned by each of
+    # magnitude / curvature / random (see src/iterative_prune.py) and the curves are
+    # stored as `iterative_prune_curves`. Ignored otherwise.
+    iterative_prune: bool = False
+    prune_granularity: str = "edge"          # "edge" (unstructured; the divergence test) | "unit" (structured; control)
+    prune_schedule: List[float] = field(     # cumulative sparsity reached each round
+        default_factory=lambda: [0.2, 0.4, 0.6, 0.8, 0.9, 0.95])
+    finetune_epochs: int = 5                 # fine-tune epochs between prune rounds
+    # Sparse-by-construction net (fixed random topology): gives genuinely non-uniform
+    # degree independently of magnitude, so graph curvature (Forman/Ollivier) has real
+    # geometric content and Ollivier-Ricci is tractable. When sparse_init, a fixed
+    # random mask at sparse_density is applied per layer and held through training;
+    # pruning then starts from that topology. prune_criteria selects which scores to
+    # compare (defaults to the CRITERIA tuple when None).
+    sparse_init: bool = False
+    sparse_density: float = 0.15             # keep-fraction of the fixed random topology
+    prune_criteria: Optional[List[str]] = None
+    calib_batches: int = 2                   # train batches averaged for activation-dependent criteria
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -139,7 +160,74 @@ def _targeted_dropout_configs() -> Dict[str, ExpConfig]:
     }
 
 
-REGISTRY: Dict[str, ExpConfig] = {**_baselines(), **_targeted_dropout_configs()}
+def _iterative_prune_configs() -> Dict[str, ExpConfig]:
+    """Iterative hard pruning on the small MNIST MLP: train one dense net, then prune
+    it by magnitude / curvature / random with fine-tuning between rounds.
+
+    edge (unstructured) is the divergence test -- removing individual weights makes
+    degree non-uniform, so Forman curvature finally carries geometric content beyond
+    |w|; unit (structured) is the control that should stay ~ magnitude because the
+    survivors remain fully interconnected. Trained with no dropout (a clean dense
+    base), evaluated on accuracy-vs-sparsity; each seed writes all three curves.
+    """
+    common = dict(dataset="mnist", widths=MNIST_SMALL, dropout_kind="none",
+                  p=0.0, epochs=40, iterative_prune=True, finetune_epochs=5)
+    return {
+        "mnist_small_ip": ExpConfig(
+            name="mnist_small_ip", prune_granularity="edge", **common),
+        "mnist_small_ip_unit": ExpConfig(
+            name="mnist_small_ip_unit", prune_granularity="unit", **common),
+    }
+
+
+def _sparse_prune_configs() -> Dict[str, ExpConfig]:
+    """Curvature vs magnitude on a sparse-by-construction MLP (fixed random topology).
+
+    The dense/E9 setting forces graph curvature to be a magnitude proxy (uniform
+    degree) or, when we impose sparsity ourselves, a destabilising degree feedback.
+    Here the topology is non-uniform by construction and chosen independently of
+    magnitude, and it is sparse enough that Ollivier-Ricci is tractable. Train one
+    fixed-sparse net per seed, then prune further by each criterion (accuracy vs
+    additional sparsity). ollivier_topo (unweighted metric) is the one signal that
+    decouples from magnitude; ollivier (weighted 1/|w|) and forman track it.
+    """
+    return {
+        "mnist_sparse_ip": ExpConfig(
+            name="mnist_sparse_ip", dataset="mnist", widths=MNIST_SMALL,
+            dropout_kind="none", p=0.0, epochs=40,
+            iterative_prune=True, sparse_init=True, sparse_density=0.15,
+            finetune_epochs=3,
+            prune_schedule=[0.85, 0.88, 0.91, 0.94, 0.96],
+            prune_criteria=["magnitude", "random", "forman", "ollivier",
+                            "ollivier_topo", "ollivier_neural"]),
+    }
+
+
+def _cnn_prune_configs() -> Dict[str, ExpConfig]:
+    """Channel-graph pruning on a LeNet CNN (Stage 1 of the CNN extension).
+
+    Extends the curvature-vs-magnitude pruning comparison to convolutions by viewing
+    each conv as a channel graph (see src/cnn_prune.py). MNIST/LeNet is the fast
+    validation regime -- and the one where arXiv:2601.16366 reports curvature ties
+    magnitude, so it doubles as a check that our pipeline reproduces that tie before
+    the heavier CIFAR/VGG test. Prunes conv channel-edges + FC weights by each
+    criterion; accuracy vs sparsity.
+    """
+    return {
+        "mnist_lenet_ip": ExpConfig(
+            name="mnist_lenet_ip", dataset="mnist", widths=[784, 10], arch="lenet",
+            dropout_kind="none", p=0.0, epochs=15,
+            iterative_prune=True, finetune_epochs=2,
+            prune_schedule=[0.3, 0.5, 0.7, 0.85, 0.92],
+            prune_criteria=["magnitude", "random", "forman", "ollivier",
+                            "ollivier_topo", "ollivier_neural"]),
+    }
+
+
+REGISTRY: Dict[str, ExpConfig] = {**_baselines(), **_targeted_dropout_configs(),
+                                  **_iterative_prune_configs(),
+                                  **_sparse_prune_configs(),
+                                  **_cnn_prune_configs()}
 
 
 def get_config(name: str) -> ExpConfig:
