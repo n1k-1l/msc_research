@@ -77,7 +77,7 @@ def run_one(sigma: float, seed: int, args) -> dict:
     curves = iterative_prune_by_criteria(
         model, loaders=(data.train, data.val, data.test), device=device,
         schedule=args.schedule, finetune_epochs=args.finetune_epochs, lr=1e-3,
-        criteria=["magnitude", "curvature", "random"], init_masks=masks)
+        criteria=args.criteria, init_masks=masks)
 
     out = {
         "sigma": sigma, "seed": seed, "density": args.density,
@@ -100,6 +100,10 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--finetune-epochs", type=int, default=3)
     ap.add_argument("--schedule", type=float, nargs="+", default=[0.6, 0.7, 0.8])
+    ap.add_argument("--criteria", nargs="+",
+                    default=["magnitude", "curvature", "random"],
+                    help="edge criteria to compare (add forman_dc for the "
+                         "degree-corrected causal ablation)")
     ap.add_argument("--data-root", default="./data")
     ap.add_argument("--results-dir", default="results_hetero")
     args = ap.parse_args()

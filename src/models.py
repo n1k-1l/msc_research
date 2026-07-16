@@ -95,16 +95,17 @@ class LeNet(nn.Module):
     -> 16*4*4=256 -> 120 -> 84 -> num_classes.
     """
     def __init__(self, num_classes: int = 10, in_ch: int = 1,
-                 activation: str = "relu"):
+                 activation: str = "relu", conv_channels=(6, 16)):
         super().__init__()
         act_cls = {"relu": nn.ReLU, "gelu": nn.GELU}[activation.lower()]
+        c1, c2 = conv_channels
         self.features = nn.Sequential(
-            nn.Conv2d(in_ch, 6, kernel_size=5), act_cls(), nn.MaxPool2d(2),
-            nn.Conv2d(6, 16, kernel_size=5), act_cls(), nn.MaxPool2d(2),
+            nn.Conv2d(in_ch, c1, kernel_size=5), act_cls(), nn.MaxPool2d(2),
+            nn.Conv2d(c1, c2, kernel_size=5), act_cls(), nn.MaxPool2d(2),
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(16 * 4 * 4, 120), act_cls(),
+            nn.Linear(c2 * 4 * 4, 120), act_cls(),
             nn.Linear(120, 84), act_cls(),
             nn.Linear(84, num_classes),
         )

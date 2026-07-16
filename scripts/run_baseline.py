@@ -42,7 +42,8 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
                     num_workers=num_workers, seed=seed)
     if getattr(cfg, "arch", "mlp") == "lenet":
         from src.models import LeNet
-        model = LeNet(num_classes=cfg.widths[-1], activation=cfg.activation)
+        model = LeNet(num_classes=cfg.widths[-1], activation=cfg.activation,
+                      conv_channels=tuple(cfg.extra.get("conv_channels", (6, 16))))
     else:
         model = MLP(widths=cfg.widths, dropout_kind=cfg.dropout_kind,
                     p=cfg.p, activation=cfg.activation)
@@ -109,12 +110,22 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
     if getattr(cfg, "iterative_prune", False):
         criteria = getattr(cfg, "prune_criteria", None) or CRITERIA
         if getattr(cfg, "arch", "mlp") == "lenet":
-            from src.cnn_prune import cnn_prune_by_criteria
-            out["iterative_prune_curves"] = cnn_prune_by_criteria(
-                model, loaders=(data.train, data.val, data.test), device=device,
-                schedule=cfg.prune_schedule, finetune_epochs=cfg.finetune_epochs,
-                lr=cfg.lr, criteria=criteria,
-                calib_batches=getattr(cfg, "calib_batches", 2))
+            if cfg.prune_granularity == "unit":
+                # whole-filter (structured): the CNN analogue of unit pruning
+                from src.cnn_prune import filter_prune_by_criteria
+                out["iterative_prune_curves"] = filter_prune_by_criteria(
+                    model, loaders=(data.train, data.val, data.test),
+                    device=device, schedule=cfg.prune_schedule,
+                    finetune_epochs=cfg.finetune_epochs, lr=cfg.lr,
+                    criteria=criteria)
+            else:
+                from src.cnn_prune import cnn_prune_by_criteria
+                out["iterative_prune_curves"] = cnn_prune_by_criteria(
+                    model, loaders=(data.train, data.val, data.test),
+                    device=device, schedule=cfg.prune_schedule,
+                    finetune_epochs=cfg.finetune_epochs,
+                    lr=cfg.lr, criteria=criteria,
+                    calib_batches=getattr(cfg, "calib_batches", 2))
         else:
             out["iterative_prune_curves"] = iterative_prune_by_criteria(
                 model, loaders=(data.train, data.val, data.test), device=device,

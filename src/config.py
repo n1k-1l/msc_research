@@ -199,7 +199,20 @@ def _sparse_prune_configs() -> Dict[str, ExpConfig]:
             finetune_epochs=3,
             prune_schedule=[0.85, 0.88, 0.91, 0.94, 0.96],
             prune_criteria=["magnitude", "random", "forman", "ollivier",
-                            "ollivier_topo", "ollivier_neural"]),
+                            "ollivier_topo"]),
+        # Mechanism study (E14): WHY does Forman collapse? Same protocol as
+        # mnist_sparse_ip but adds forman_dc (degree-corrected Forman -- the
+        # causal ablation: if the collapse vanishes when the degree term is
+        # removed by construction, the degree term IS the failure mode) and the
+        # per-step prune forensics now recorded by _prune_edges_to (what each
+        # criterion kills: endpoint degrees, |w| percentile, orphaned units).
+        "mnist_sparse_mech": ExpConfig(
+            name="mnist_sparse_mech", dataset="mnist", widths=MNIST_SMALL,
+            dropout_kind="none", p=0.0, epochs=40,
+            iterative_prune=True, sparse_init=True, sparse_density=0.15,
+            finetune_epochs=3,
+            prune_schedule=[0.85, 0.88, 0.91, 0.94, 0.96],
+            prune_criteria=["magnitude", "forman", "forman_dc", "random"]),
     }
 
 
@@ -220,7 +233,19 @@ def _cnn_prune_configs() -> Dict[str, ExpConfig]:
             iterative_prune=True, finetune_epochs=2,
             prune_schedule=[0.3, 0.5, 0.7, 0.85, 0.92],
             prune_criteria=["magnitude", "random", "forman", "ollivier",
-                            "ollivier_topo", "ollivier_neural"]),
+                            "ollivier_topo"]),
+        # Whole-FILTER (structured) pruning -- the practically dominant CNN
+        # granularity and the structured counterpart of the E9 unit control.
+        # Removing whole filters keeps the channel graph complete bipartite among
+        # survivors (uniform degree), so the mechanism predicts forman ~ magnitude
+        # with no collapse. Wider convs (32, 64) so the filter sweep has granularity.
+        "mnist_lenet_filter": ExpConfig(
+            name="mnist_lenet_filter", dataset="mnist", widths=[784, 10],
+            arch="lenet", dropout_kind="none", p=0.0, epochs=15,
+            iterative_prune=True, prune_granularity="unit", finetune_epochs=2,
+            prune_schedule=[0.3, 0.5, 0.7, 0.85, 0.92],
+            prune_criteria=["magnitude", "curvature", "random"],
+            extra={"conv_channels": [32, 64]}),
     }
 
 

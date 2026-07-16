@@ -30,7 +30,6 @@ STYLE = {
     "forman":        ("#2ca02c", "--", "s"),
     "ollivier":      ("#9467bd", "--", "^"),
     "ollivier_topo": ("#1f77b4", "-",  "D"),
-    "ollivier_neural": ("#e377c2", "-", "P"),
 }
 
 

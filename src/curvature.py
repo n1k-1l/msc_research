@@ -121,6 +121,42 @@ def forman_edges_masked(A: torch.Tensor, mask: torch.Tensor,
 
 
 @torch.no_grad()
+def forman_dc_edges_masked(A: torch.Tensor, mask: torch.Tensor,
+                           eps: float = 1e-12) -> torch.Tensor:
+    """DEGREE-CORRECTED Forman curvature: the neighbour sum replaced by a mean.
+
+    The masked Forman score F(e) = 2 - sum_{e'~e} sqrt(w_e/w_e') mixes two
+    signals: the weight-geometric ratios sqrt(w_e/w_e') and the sheer COUNT of
+    neighbouring edges, deg(u)+deg(v)-2. On a degree-heterogeneous graph the
+    count term dominates (the collapse mechanism). This variant removes it by
+    construction:
+
+        F_dc(e) = 1 - mean_{e'~e} sqrt(w_e/w_e')
+
+    On any unweighted graph F_dc = 0 for every edge regardless of degree (vs
+    F = 4 - deg(u) - deg(v)), so all remaining variation is weight-geometric.
+    Used as the causal ablation for the collapse mechanism: if pruning by F_dc
+    shows no collapse where F does, the degree term IS the failure mode.
+
+    An edge with no neighbouring edge (both endpoints degree 1) is a bridge,
+    not redundant: it gets -inf (pruned last under largest=True). Masked-out
+    edges return NaN, as in forman_edges_masked.
+    """
+    inv_sqrt = torch.where(mask, A.clamp_min(eps).rsqrt(), torch.zeros_like(A))
+    s_src = inv_sqrt.sum(dim=0, keepdim=True)   # (1, n_src)
+    s_tgt = inv_sqrt.sum(dim=1, keepdim=True)   # (n_tgt, 1)
+    deg_src = mask.sum(dim=0, keepdim=True)
+    deg_tgt = mask.sum(dim=1, keepdim=True)
+    n_nbr = (deg_src + deg_tgt - 2).to(A.dtype)
+    # e itself contributes 1/sqrt(w_e) to each of S(u), S(v), i.e. exactly 2 to
+    # the product below; subtracting it leaves the sum over true neighbours.
+    ratio_sum = (A.sqrt() * (s_src + s_tgt) - 2.0).clamp_min(0.0)
+    F = torch.where(n_nbr > 0, 1.0 - ratio_sum / n_nbr.clamp_min(1.0),
+                    torch.full_like(A, float("-inf")))
+    return torch.where(mask, F, torch.full_like(F, float("nan")))
+
+
+@torch.no_grad()
 def per_neuron_curvature_masked(weights: List[torch.Tensor],
                                 masks: List[torch.Tensor]) -> List[torch.Tensor]:
     """Per-neuron Forman curvature on a masked (unstructured-pruned) weight graph.

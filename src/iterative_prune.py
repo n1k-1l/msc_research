@@ -38,15 +38,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .curvature import forman_edges_masked, per_neuron_curvature_masked, weight_magnitude
+from .curvature import (forman_dc_edges_masked, forman_edges_masked,
+                        per_neuron_curvature_masked, weight_magnitude)
 from .train import evaluate
 
 CRITERIA = ("magnitude", "curvature", "random")
 
 # Criteria that need per-neuron activation vectors (data-dependent scoring).
-_ACT_CRITERIA = ("forman_act", "ollivier_act", "ollivier_neural")
-# Criteria that call the (heavier) Ollivier-Ricci solver.
-_OLLIVIER_CRITERIA = ("ollivier", "ollivier_topo", "ollivier_act")
+_ACT_CRITERIA = ("forman_act",)
+# Criteria that call the (heavier) Ollivier-Ricci solver (library implementation).
+_OLLIVIER_CRITERIA = ("ollivier", "ollivier_topo")
 
 
 @torch.no_grad()
@@ -160,9 +161,12 @@ def _edge_scores(W: torch.Tensor, mask: torch.Tensor, criterion: str,
 
     magnitude:     smallest |w| prunable (largest=False).
     curvature/forman: most positive Forman F(e) prunable -- redundant (largest=True).
+    forman_dc:     DEGREE-CORRECTED Forman (neighbour mean, not sum) -- the causal
+                   ablation for the collapse mechanism; most positive prunable.
     forman_act:    Forman on activation-gated weights (data-dependent).
-    ollivier:      Ollivier-Ricci; most positive prunable (largest=True).
-    ollivier_act:  Ollivier-Ricci with activation-gated edge distances (the paper).
+    ollivier:      Ollivier-Ricci, weighted 1/|w| metric (library implementation);
+                   most positive prunable (largest=True).
+    ollivier_topo: Ollivier-Ricci on the unweighted graph -- pure topology.
     random:        control.
     """
     A = W.abs()
@@ -172,34 +176,40 @@ def _edge_scores(W: torch.Tensor, mask: torch.Tensor, criterion: str,
         return torch.rand_like(A), False
     if criterion in ("curvature", "forman"):
         return forman_edges_masked(A, mask), True
+    if criterion == "forman_dc":
+        return forman_dc_edges_masked(A, mask), True
     if criterion == "forman_act":
         return forman_edges_masked(_act_gate(A, act), mask), True
-    if criterion == "ollivier_neural":
-        # Faithful activation-weighted ORC: activations in the transport measures.
-        from .ollivier_neural import neural_ollivier_edges_masked
-        a_src, a_tgt = act
-        return neural_ollivier_edges_masked(W, mask, a_src, a_tgt), True
     if criterion in _OLLIVIER_CRITERIA:
         from .ollivier import ollivier_edges_masked
         if criterion == "ollivier_topo":
             # Unweighted metric: isolates graph geometry from weight magnitude (a
             # weighted 1/|w| metric makes ORC a near-perfect magnitude proxy).
             return ollivier_edges_masked(torch.ones_like(W), mask), True
-        a_src, a_tgt = act if criterion == "ollivier_act" else (None, None)
-        return ollivier_edges_masked(W, mask, act_src=a_src, act_tgt=a_tgt), True
+        return ollivier_edges_masked(W, mask), True
     raise ValueError(f"unknown criterion {criterion!r}")
 
 
 @torch.no_grad()
 def _prune_edges_to(linears, masks, criterion: str, target: float,
-                    acts: Optional[List[torch.Tensor]] = None) -> None:
+                    acts: Optional[List[torch.Tensor]] = None) -> List[Dict]:
     """Prune each layer's surviving edges down to cumulative sparsity `target`
     (per-layer, so no layer can be wiped out). `acts` (per-layer activation vectors,
-    length n_layers+1) is required for the data-dependent criteria."""
+    length n_layers+1) is required for the data-dependent criteria.
+
+    Returns per-layer FORENSICS on what this step killed -- the mechanism autopsy:
+    where the pruned edges sat in the |w| ranking, the degree of their endpoints
+    relative to the surviving population, and how many vertices the step fully
+    disconnected. The collapse mechanism predicts curvature preferentially prunes
+    low-degree-endpoint edges regardless of |w| (few neighbours => few negative
+    terms => F more positive), orphaning vertices; magnitude should show neither.
+    """
+    forensics: List[Dict] = []
     for k, (lin, m) in enumerate(zip(linears, masks)):
         total = m.numel()
         n_new = int(round(target * total)) - int((~m).sum())
         if n_new <= 0:
+            forensics.append({"layer": k, "n_pruned": 0})
             continue                            # skip scoring (esp. costly Ollivier) on no-op
         act = (acts[k], acts[k + 1]) if acts is not None else None
         scores, largest = _edge_scores(lin.weight, m, criterion, act=act)
@@ -207,8 +217,37 @@ def _prune_edges_to(linears, masks, criterion: str, target: float,
         n_take = min(n_new, surv.numel())
         sel = torch.topk(scores.view(-1)[surv], n_take, largest=largest).indices
         prune_idx = surv[sel]
+
+        # --- forensics, measured on the pre-prune state -----------------------
+        n_src = m.shape[1]
+        A = lin.weight.abs().view(-1)
+        deg_src, deg_tgt = m.sum(dim=0), m.sum(dim=1)
+        rows = torch.div(prune_idx, n_src, rounding_mode="floor")
+        cols = prune_idx % n_src
+        pruned_deg = (deg_tgt[rows] + deg_src[cols]).float()
+        surv_rows = torch.div(surv, n_src, rounding_mode="floor")
+        surv_deg = (deg_tgt[surv_rows] + deg_src[surv % n_src]).float()
+        # percentile of each pruned edge's |w| among pre-prune survivors
+        mag_sorted = A[surv].sort().values
+        pct = torch.searchsorted(mag_sorted, A[prune_idx].contiguous()).float() \
+            / max(surv.numel(), 1)
+        alive_src, alive_tgt = deg_src > 0, deg_tgt > 0
+        # ----------------------------------------------------------------------
+
         m.view(-1)[prune_idx] = False
         lin.weight.view(-1)[prune_idx] = 0.0
+        forensics.append({
+            "layer": k,
+            "n_pruned": int(n_take),
+            "pruned_deg_mean": float(pruned_deg.mean()),
+            "pruned_deg_median": float(pruned_deg.median()),
+            "surv_deg_mean": float(surv_deg.mean()),
+            "pruned_mag_pctile_mean": float(pct.mean()),
+            "pruned_mag_pctile_median": float(pct.median()),
+            "new_disconnected_src": int((alive_src & (m.sum(dim=0) == 0)).sum()),
+            "new_disconnected_tgt": int((alive_tgt & (m.sum(dim=1) == 0)).sum()),
+        })
+    return forensics
 
 
 # --------------------------------------------------------------------------- #
@@ -279,24 +318,43 @@ def _measure(linears, masks, model, val_loader, test_loader, device,
     total_edges = sum(m.numel() for m in masks)
     pruned_edges = sum(int((~m).sum()) for m in masks)
     pearson, spearman, degree_cv = [], [], []
+    pearson_dc, spearman_dc = [], []
     weights = [lin.weight for lin in linears]
 
     for k, (lin, m) in enumerate(zip(linears, masks)):
         A = lin.weight.abs()
         F = forman_edges_masked(A, m)
+        Fdc = forman_dc_edges_masked(A, m)
         surv = m
         if surv.sum() >= 2:
             mag = A[surv].cpu().numpy()
             cur = F[surv].cpu().numpy()
             pearson.append(_pearson(mag, cur))
             spearman.append(_spearman(mag, cur))
+            # degree-corrected coupling over edges where F_dc is defined
+            # (bridges are -inf by construction and drop out of the correlation)
+            fin = surv & torch.isfinite(Fdc)
+            if fin.sum() >= 2:
+                pearson_dc.append(_pearson(A[fin].cpu().numpy(),
+                                           Fdc[fin].cpu().numpy()))
+                spearman_dc.append(_spearman(A[fin].cpu().numpy(),
+                                             Fdc[fin].cpu().numpy()))
+            else:
+                pearson_dc.append(float("nan"))
+                spearman_dc.append(float("nan"))
         else:
             pearson.append(float("nan"))
             spearman.append(float("nan"))
+            pearson_dc.append(float("nan"))
+            spearman_dc.append(float("nan"))
         deg = torch.cat([m.sum(dim=0).float(), m.sum(dim=1).float()])
         deg = deg[deg > 0]
         degree_cv.append(float(deg.std(unbiased=False) / deg.mean())
                          if deg.numel() and deg.mean() > 0 else float("nan"))
+
+    # cumulative dead hidden units (no surviving incident edge on either side)
+    n_hidden = len(linears) - 1
+    dead_units = [int((~_unit_alive(masks, h)).sum()) for h in range(1, n_hidden + 1)]
 
     return {
         "round": r,
@@ -306,7 +364,10 @@ def _measure(linears, masks, model, val_loader, test_loader, device,
         "test_acc": float(evaluate(model, test_loader, device)),
         "pearson_curv_mag": pearson,               # per hidden-adjacent layer
         "spearman_curv_mag": spearman,
+        "pearson_dc_mag": pearson_dc,              # degree-corrected Forman vs |w|
+        "spearman_dc_mag": spearman_dc,
         "degree_cv": degree_cv,
+        "dead_units": dead_units,                  # cumulative, per hidden layer
     }
 
 
@@ -343,15 +404,19 @@ def iterative_prune_one(model: nn.Module, criterion: str, loaders, device,
             from .activations import collect_activations
             batches = list(itertools.islice(train_loader, calib_batches))
             acts = collect_activations(model, batches, device)
+        forensics = None
         if granularity == "edge":
-            _prune_edges_to(linears, masks, criterion, target, acts=acts)
+            forensics = _prune_edges_to(linears, masks, criterion, target, acts=acts)
         elif granularity == "unit":
             _prune_units_to(linears, masks, criterion, target)
         else:
             raise ValueError(f"unknown granularity {granularity!r}")
         _finetune(model, train_loader, device, finetune_epochs, lr, linears, masks)
-        records.append(_measure(linears, masks, model, val_loader, test_loader,
-                                device, r, target, granularity))
+        rec = _measure(linears, masks, model, val_loader, test_loader,
+                       device, r, target, granularity)
+        if forensics is not None:
+            rec["forensics"] = forensics           # what THIS step killed (per layer)
+        records.append(rec)
     return records
 
 

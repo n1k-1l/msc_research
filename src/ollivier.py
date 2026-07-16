@@ -13,12 +13,12 @@ a sparse-by-construction net (~50-80k edges) a full-layer computation is ~2-3s.
 
 `ollivier_edges_masked` matches the `forman_edges_masked` interface exactly (per-edge
 tensor shaped like W, NaN on pruned edges), so it drops straight into the pruning
-scorer. Edge distance = 1 / (|w| * gate), gate optionally folding endpoint activations
-(data-dependence): an edge touching a rarely-firing neuron becomes "longer". Higher
-positive curvature = redundant (prunable), as with Forman.
+scorer. Edge distance = 1/|w| (strong connection = short); pass an all-ones W for the
+purely topological variant. Higher positive curvature = redundant (prunable), as with
+Forman. Uses the standard GraphRicciCurvature library (Ni et al.) throughout -- no
+bespoke curvature construction.
 """
 from __future__ import annotations
-from typing import Optional
 import numpy as np
 import torch
 import networkx as nx
@@ -29,8 +29,6 @@ from GraphRicciCurvature.OllivierRicci import OllivierRicci
 def ollivier_edges_masked(
     W: torch.Tensor,
     mask: torch.Tensor,
-    act_src: Optional[torch.Tensor] = None,
-    act_tgt: Optional[torch.Tensor] = None,
     alpha: float = 0.5,
     method: str = "OTDSinkhornMix",
     eps: float = 1e-6,
@@ -39,11 +37,8 @@ def ollivier_edges_masked(
 
     Args:
         W: (n_tgt, n_src) weight matrix (Linear.weight); W[i,j] connects source j to
-           target i. |W| gives edge strength.
+           target i. |W| gives edge strength (all-ones = topological variant).
         mask: bool, same shape; True = edge present.
-        act_src, act_tgt: optional per-neuron activation vectors (source side length
-           n_src, target side n_tgt) to gate edge distance (data-dependence). None =
-           static ORC.
         alpha: Ollivier idleness (mass kept at the node); 0.5 is the common default.
 
     Returns:
@@ -57,13 +52,7 @@ def ollivier_edges_masked(
     tgt = idx[:, 0]
     src = idx[:, 1]
     w = A[tgt, src].clamp_min(eps)
-
-    gate = torch.ones_like(w)
-    if act_src is not None:
-        gate = gate * act_src.to(w.device)[src].clamp_min(eps).sqrt()
-    if act_tgt is not None:
-        gate = gate * act_tgt.to(w.device)[tgt].clamp_min(eps).sqrt()
-    dist = (1.0 / (w * gate)).cpu().numpy()
+    dist = (1.0 / w).cpu().numpy()
 
     s_np = src.cpu().numpy()
     t_np = tgt.cpu().numpy()
