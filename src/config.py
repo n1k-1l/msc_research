@@ -74,6 +74,7 @@ class ExpConfig:
 
 
 # ----- model architectures -----
+MNIST_TINY  = [784, 64, 32, 10]    # small enough for the literal Eq.(2) evaluation
 MNIST_SMALL = [784, 512, 256, 10]
 MNIST_DEEP  = [784, 1024, 512, 256, 10]
 CIFAR_MAIN  = [3072, 1024, 512, 256, 10]
@@ -158,6 +159,64 @@ def _targeted_dropout_configs() -> Dict[str, ExpConfig]:
             name="mnist_small_td_random", prob_source="random",
             target_direction="low", **common),
     }
+
+
+def _eq2_eq4_equivalence_configs() -> Dict[str, ExpConfig]:
+    """Eq.(2)-vs-Eq.(4) end-to-end equivalence check (E15).
+
+    The thesis computes Forman curvature via the closed form (Eq. 4), an algebraic
+    identity with the literature definition (Eq. 2). This experiment demonstrates
+    the identity empirically on real training runs, not just unit tests: the
+    standard Targeted-Dropout comparison on a TINY MLP (so the literal per-edge
+    Eq. 2 evaluation is affordable at every-epoch recompute), with two curvature
+    arms differing ONLY in which implementation computes the score. Identical
+    scores => identical targeted masks => identical training trajectories and
+    prune curves; the hook logs max|score_direct - score_closed| per recompute
+    (expected ~1e-6) and the wall cost of each criterion (the closed form's speed
+    advantage). Magnitude is the vanilla-TD reference arm.
+    """
+    common = dict(dataset="mnist", widths=MNIST_TINY, dropout_kind="per_neuron",
+                  p=0.0, epochs=40, warmup_epochs=0, recompute_every=1,
+                  prob_mapping="targeted", target_gamma=0.5, target_drop=0.5)
+    return {
+        "mnist_tiny_td_magnitude": ExpConfig(
+            name="mnist_tiny_td_magnitude", prob_source="magnitude",
+            target_direction="low", **common),
+        "mnist_tiny_td_forman": ExpConfig(
+            name="mnist_tiny_td_forman", prob_source="forman",
+            target_direction="high", **common),
+        "mnist_tiny_td_forman_direct": ExpConfig(
+            name="mnist_tiny_td_forman_direct", prob_source="forman_direct",
+            target_direction="high", **common),
+    }
+
+
+def _width_sweep_td_configs() -> Dict[str, ExpConfig]:
+    """Width dose-response for the TD comparison (E16).
+
+    Proposition 1's concentration argument predicts the curvature<->magnitude
+    coupling weakens as layers narrow (far-endpoint strengths fluctuate
+    O(1/sqrt(width))), so narrow nets are where curvature's magnitude-orthogonal
+    component is largest -- and both E5 (512-256, small forman edge at sparsity
+    0.6-0.7, t=3.9) and E15 (64-32, same direction at n=3) hint it might be
+    predictive there. This sweep turns those anecdotes into a dose-response:
+    hidden pairs (h, h/2) for h in 32..256, identical TD protocol, n=10, with the
+    existing E5 runs (results_td_cpu) supplying the 512 point. Outputs per width:
+    trained coupling rho (from the hook's curv/mag arrays) and the paired
+    forman-magnitude prune-curve differences.
+    """
+    cfgs: Dict[str, ExpConfig] = {}
+    for h1 in (32, 64, 128, 256):
+        common = dict(dataset="mnist", widths=[784, h1, h1 // 2, 10],
+                      dropout_kind="per_neuron", p=0.0, epochs=40,
+                      warmup_epochs=0, recompute_every=1,
+                      prob_mapping="targeted", target_gamma=0.5, target_drop=0.5)
+        for src, direction in (("magnitude", "low"), ("forman", "high"),
+                               ("random", "low")):
+            name = f"mnist_w{h1}_td_{src}"
+            cfgs[name] = ExpConfig(name=name, prob_source=src,
+                                   target_direction=direction, **common)
+    return cfgs
 
 
 def _iterative_prune_configs() -> Dict[str, ExpConfig]:
@@ -250,6 +309,8 @@ def _cnn_prune_configs() -> Dict[str, ExpConfig]:
 
 
 REGISTRY: Dict[str, ExpConfig] = {**_baselines(), **_targeted_dropout_configs(),
+                                  **_eq2_eq4_equivalence_configs(),
+                                  **_width_sweep_td_configs(),
                                   **_iterative_prune_configs(),
                                   **_sparse_prune_configs(),
                                   **_cnn_prune_configs()}

@@ -54,6 +54,8 @@ retained more often.
 """
 from __future__ import annotations
 from typing import Callable, List, Dict, Any, Sequence, Union
+import time
+
 import torch
 import torch.nn as nn
 
@@ -218,6 +220,55 @@ def per_neuron_curvature(weights: List[torch.Tensor]) -> List[torch.Tensor]:
 
 
 @torch.no_grad()
+def forman_edges_direct(A: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """LITERAL per-edge evaluation of the general Forman formula (Eq. 2 of the
+    writeup, unit vertex weights) -- the independent reference implementation.
+
+    Deliberately avoids the strength factorisation of forman_edges: for every
+    edge, the neighbour sums are taken over explicit index sets that exclude the
+    edge itself (no S(v)-minus-self arithmetic). O(E * (n_src + n_tgt)) with a
+    Python loop over edges, so restrict to small layers -- this exists solely for
+    the end-to-end equivalence experiment (identical scores => identical TD runs),
+    not for production use.
+    """
+    n_tgt, n_src = A.shape
+    inv = A.clamp_min(eps).rsqrt()
+    sq = A.sqrt()
+    F = torch.empty_like(A)
+    for a in range(n_tgt):
+        row = inv[a]                                        # edges at target a
+        for b in range(n_src):
+            col = inv[:, b]                                 # edges at source b
+            s_src = torch.cat((col[:a], col[a + 1:])).sum() # e' at source, e' != e
+            s_tgt = torch.cat((row[:b], row[b + 1:])).sum() # e' at target, e' != e
+            # w_e * (1/w_e + 1/w_e - sum 1/sqrt(w_e w_e')) with unit vertex weights
+            F[a, b] = 2.0 - sq[a, b] * (s_src + s_tgt)
+    return F
+
+
+@torch.no_grad()
+def per_neuron_curvature_direct(weights: List[torch.Tensor]) -> List[torch.Tensor]:
+    """Per-neuron curvature via the literal general-formula evaluation
+    (forman_edges_direct). Numerically equal to per_neuron_curvature (the closed
+    form) to float tolerance; registered as score source 'forman_direct' so the
+    Eq.(2)-vs-Eq.(4) equivalence can be demonstrated end-to-end on real training
+    runs, not just unit tests."""
+    A = [W.abs() for W in weights]
+    sizes = [A[0].shape[1]] + [a.shape[0] for a in A]
+    dev, dtype = A[0].device, A[0].dtype
+
+    kappa_sum = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
+    degree = [torch.zeros(n, device=dev, dtype=dtype) for n in sizes]
+    for k, a in enumerate(A):
+        F = forman_edges_direct(a)
+        kappa_sum[k] += F.sum(dim=0)
+        kappa_sum[k + 1] += F.sum(dim=1)
+        degree[k] += F.shape[0]
+        degree[k + 1] += F.shape[1]
+    return [ks / d for ks, d in zip(kappa_sum, degree)]
+
+
+@torch.no_grad()
 def weight_magnitude(weights: List[torch.Tensor]) -> List[torch.Tensor]:
     """Per-neuron L2 norm of incident weights (weight-magnitude control).
 
@@ -254,8 +305,10 @@ def random_curvature(weights: List[torch.Tensor]) -> List[torch.Tensor]:
 
 
 # Selectable per-neuron score function: the method and its controls.
+# forman_direct is the literal general-formula evaluation (equivalence check).
 SCORE_SOURCES: Dict[str, ScoreFn] = {
     "forman": per_neuron_curvature,
+    "forman_direct": per_neuron_curvature_direct,
     "magnitude": weight_magnitude,
     "random": random_curvature,
 }
@@ -470,7 +523,9 @@ class DropoutProbHook:
             "layers")
 
         weights = [lin.weight for lin in linears]
+        t0 = time.perf_counter()
         scores = self.source(weights)
+        score_seconds = time.perf_counter() - t0   # wall cost of the criterion
         n_hidden = len(drops)
         # Diagnostic: how different are the curvature and magnitude orderings as
         # training proceeds -- the key read on whether curvature is more than a
@@ -494,6 +549,12 @@ class DropoutProbHook:
                 curv_k, mag_k = diag[0][k + 1], diag[1][k + 1]
                 stats = _layer_stats(score, probs)
                 stats["pearson_curv_mag"] = _pearson(curv_k, mag_k)
+                # Deviation of the arm's own score from the closed-form Forman
+                # curvature. ~1e-6 for the forman_direct arm (the Eq.2-vs-Eq.4
+                # equivalence check), exactly 0 for the forman arm, and large/
+                # meaningless for magnitude or random.
+                stats["max_abs_diff_vs_closed_forman"] = float(
+                    (score - curv_k).abs().max())
                 # Raw per-neuron arrays so curvature-vs-magnitude scatter plots can
                 # be drawn at each checkpoint (curv = Forman kappa, mag = L2 norm).
                 stats["curv"] = curv_k.cpu().tolist()
@@ -501,7 +562,8 @@ class DropoutProbHook:
                 layer_log.append(stats)
 
         if self.record:
-            self.log.append({"epoch": epoch, "layers": layer_log})
+            self.log.append({"epoch": epoch, "score_seconds": score_seconds,
+                             "layers": layer_log})
 
 
 def make_dropout_prob_hook(
