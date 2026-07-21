@@ -59,7 +59,8 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
             standardize=cfg.standardize,
             source=get_source(cfg.prob_source),
             mapping=cfg.prob_mapping, gamma=cfg.target_gamma,
-            drop=cfg.target_drop, direction=cfg.target_direction)
+            drop=cfg.target_drop, direction=cfg.target_direction,
+            noise=getattr(cfg, "score_noise", 0.0))
 
     # Sparse-by-construction topology: a fixed random mask per layer, seeded per run,
     # held through training (weight_masks) and used as the starting point for pruning.

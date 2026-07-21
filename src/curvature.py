@@ -474,6 +474,7 @@ class DropoutProbHook:
         gamma: float = 0.5,
         drop: float = 0.5,
         direction: str = "low",
+        noise: float = 0.0,
     ):
         self.p_base = p_base
         self.alpha = alpha
@@ -483,6 +484,11 @@ class DropoutProbHook:
         self.standardize = standardize
         self.source = source
         self.record = record
+        # noise > 0: z-score each layer's score, then add noise * N(0,1) redrawn
+        # at every recompute -- the "unstable but correlated ranking" control
+        # (does magnitude + churn reproduce curvature-TD's robustness edge with
+        # no curvature in the loop?). Uses the global RNG => seed-reproducible.
+        self.noise = noise
         # mapping=="targeted" -> Targeted-Dropout mask (scores_to_targeted_probs),
         # using gamma/drop/direction; otherwise the Eq. 4 sigmoid (scores_to_probs),
         # using alpha/beta/standardize.
@@ -536,6 +542,9 @@ class DropoutProbHook:
         for k, dmod in enumerate(drops):
             # dmod k follows linears[k], whose output is hidden layer (k + 1).
             score = scores[k + 1]
+            if self.noise > 0:
+                z = (score - score.mean()) / (score.std(unbiased=False) + 1e-12)
+                score = z + self.noise * torch.randn_like(z)
             if self.mapping == "targeted":
                 probs = scores_to_targeted_probs(score, self.gamma, self.drop,
                                                  direction=self.direction)
@@ -559,6 +568,10 @@ class DropoutProbHook:
                 # be drawn at each checkpoint (curv = Forman kappa, mag = L2 norm).
                 stats["curv"] = curv_k.cpu().tolist()
                 stats["mag"] = mag_k.cpu().tolist()
+                if self.noise > 0:
+                    # the actual (noisy) ranking used this recompute, so the
+                    # targeted-set churn can be reconstructed offline
+                    stats["score"] = score.cpu().tolist()
                 layer_log.append(stats)
 
         if self.record:
@@ -579,8 +592,10 @@ def make_dropout_prob_hook(
     gamma: float = 0.5,
     drop: float = 0.5,
     direction: str = "low",
+    noise: float = 0.0,
 ) -> DropoutProbHook:
     """Build a DropoutProbHook. See DropoutProbHook for the arguments."""
     return DropoutProbHook(p_base, alpha, beta, warmup_epochs, recompute_every,
                            standardize=standardize, source=source, record=record,
-                           mapping=mapping, gamma=gamma, drop=drop, direction=direction)
+                           mapping=mapping, gamma=gamma, drop=drop, direction=direction,
+                           noise=noise)

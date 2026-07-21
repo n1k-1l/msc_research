@@ -47,6 +47,7 @@ class ExpConfig:
     target_gamma: float = 0.5                # fraction of units targeted (gamma)
     target_drop: float = 0.5                 # drop probability for targeted units (alpha)
     target_direction: str = "low"            # "low" (small=prunable: magnitude) | "high" (large=prunable: curvature)
+    score_noise: float = 0.0                 # z-score the signal + add noise*N(0,1) per recompute (churn control)
     # Iterative hard pruning (train dense -> prune a fraction -> fine-tune -> repeat),
     # to test whether curvature diverges from magnitude under NON-uniform connectivity.
     # When iterative_prune is set, the trained dense net is pruned by each of
@@ -191,6 +192,33 @@ def _eq2_eq4_equivalence_configs() -> Dict[str, ExpConfig]:
     }
 
 
+def _noisy_magnitude_td_configs() -> Dict[str, ExpConfig]:
+    """Magnitude + rank noise: the causal control for the annealed-targeting
+    account of curvature-TD's robustness edge (E17).
+
+    E16 attributes the past-gamma edge to ranking CHURN (unstable but
+    magnitude-correlated targeting), not to geometric content. If that is right,
+    magnitude scores with per-recompute additive noise -- no curvature anywhere
+    in the loop -- must reproduce the gamma-centred trade-off at a noise level
+    whose churn matches forman's (Jaccard ~0.6-0.8), interpolating between
+    magnitude-TD (sigma=0, frozen set) and random-TD (sigma=inf). Post-training
+    prune curves use CLEAN magnitude (prob_source), so the arms measure trained
+    robustness, not a noisy eval.
+    """
+    cfgs: Dict[str, ExpConfig] = {}
+    for tag, widths in (("w64", [784, 64, 32, 10]), ("w512", MNIST_SMALL)):
+        for sigma in (0.25, 0.5, 1.0):
+            name = f"mnist_{tag}_td_magnoise{round(sigma * 100):03d}"
+            cfgs[name] = ExpConfig(
+                name=name, dataset="mnist", widths=widths,
+                dropout_kind="per_neuron", p=0.0, epochs=40,
+                warmup_epochs=0, recompute_every=1,
+                prob_mapping="targeted", target_gamma=0.5, target_drop=0.5,
+                prob_source="magnitude", target_direction="low",
+                score_noise=sigma)
+    return cfgs
+
+
 def _width_sweep_td_configs() -> Dict[str, ExpConfig]:
     """Width dose-response for the TD comparison (E16).
 
@@ -311,6 +339,7 @@ def _cnn_prune_configs() -> Dict[str, ExpConfig]:
 REGISTRY: Dict[str, ExpConfig] = {**_baselines(), **_targeted_dropout_configs(),
                                   **_eq2_eq4_equivalence_configs(),
                                   **_width_sweep_td_configs(),
+                                  **_noisy_magnitude_td_configs(),
                                   **_iterative_prune_configs(),
                                   **_sparse_prune_configs(),
                                   **_cnn_prune_configs()}
