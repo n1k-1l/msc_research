@@ -23,6 +23,11 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+plt.rcParams.update({
+    "font.size": 19, "axes.titlesize": 19, "axes.labelsize": 19,
+    "xtick.labelsize": 16, "ytick.labelsize": 16,
+    "legend.fontsize": 16, "legend.title_fontsize": 16,
+    "lines.linewidth": 2.5, "lines.markersize": 8})
 
 # Shared poster palette: forman (method) / magnitude (baseline) / random (control).
 COL = {"forman": "#1f77b4", "magnitude": "#ff7f0e", "random": "#7f7f7f"}
@@ -53,25 +58,18 @@ def main() -> None:
         data, spars, n = load(args.results_dir, cfg)
         for c in ("forman", "magnitude", "random"):
             m, sd = data[c].mean(0), data[c].std(0)
-            ax.plot(spars, m, marker="o", ms=4, color=COL[c], label=c)
+            ax.plot(spars, m, marker="o", color=COL[c], label=c)
             ax.fill_between(spars, m - sd, m + sd, alpha=0.15, color=COL[c])
-        # paired forman - magnitude significance (matched seeds)
-        d = data["forman"] - data["magnitude"]
-        t = d.mean(0) / (d.std(0, ddof=1) / np.sqrt(n) + 1e-12)
-        for i, s in enumerate(spars):
-            if abs(t[i]) > 2.26:
-                y = max(data["forman"][:, i].mean(), data["magnitude"][:, i].mean())
-                # colour the star by the winner: blue = forman better, orange = magnitude
-                win = COL["forman"] if t[i] > 0 else COL["magnitude"]
-                ax.annotate("*", (s, y + 0.015), ha="center", color=win, fontsize=16)
-        ax.set_xlabel("sparsity (fraction of hidden units pruned)")
+        # inference lives in the corresponding table (Bonferroni within family);
+        # the figure shows estimates only
+        ax.set_xlabel("fraction of units pruned")
         ax.set_ylabel("test accuracy")
-        ax.set_title(f"{cfg.replace('mnist_small_', '')}  (n = {n})")
+        TITLES = {"mnist_small_uniform_p25": "uniform dropout, $p=0.25$",
+                  "mnist_small_nodrop": "no dropout"}
+        ax.set_title(TITLES.get(cfg, cfg))
         ax.grid(alpha=0.3)
         ax.legend()
-    fig.suptitle("Neutral net pruned by each criterion\n"
-                 "(* = significant forman$-$magnitude difference, p<0.05)")
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.tight_layout()
     out = Path(args.results_dir) / "neutral_prune.png"
     fig.savefig(out, dpi=130, bbox_inches="tight")
     fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")  # vector copy (thesis)

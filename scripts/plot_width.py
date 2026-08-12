@@ -22,6 +22,11 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+plt.rcParams.update({
+    "font.size": 19, "axes.titlesize": 19, "axes.labelsize": 19,
+    "xtick.labelsize": 16, "ytick.labelsize": 16,
+    "legend.fontsize": 16, "legend.title_fontsize": 16,
+    "lines.linewidth": 2.5, "lines.markersize": 8})
 
 WIDTHS = [(32, "results_width", "mnist_w32"), (64, "results_width", "mnist_w64"),
           (128, "results_width", "mnist_w128"), (256, "results_width", "mnist_w256"),
@@ -56,7 +61,11 @@ def main() -> None:
     ap.add_argument("--out", default="results_width/width")
     args = ap.parse_args()
 
-    fig, (axA, axB, axC) = plt.subplots(1, 3, figsize=(13.5, 4.3))
+    fig = plt.figure(figsize=(13, 8.6))
+    gs = fig.add_gridspec(2, 2, hspace=0.35, wspace=0.25)
+    axA = fig.add_subplot(gs[0, 0])
+    axC = fig.add_subplot(gs[0, 1])
+    axB = fig.add_subplot(gs[1, :])
     ws = [w for w, _, _ in WIDTHS]
 
     # (a) coupling vs width
@@ -74,9 +83,8 @@ def main() -> None:
     axA.set_xticks(ws); axA.set_xticklabels(ws)
     axA.set_xlabel("hidden width $h$ (layers $h$, $h/2$)")
     axA.set_ylabel(r"trained Spearman $\rho(\kappa, \|w\|)$")
-    axA.set_title("(a) coupling weakens as layers narrow\n(Prop. 1 concentration)",
-                  fontsize=10)
-    axA.grid(alpha=0.3); axA.legend(fontsize=8)
+    axA.set_title("(a) trained coupling")
+    axA.grid(alpha=0.3); axA.legend()
 
     # (b) paired forman - magnitude across the sweep, per width
     cmap = plt.get_cmap("viridis")
@@ -88,19 +96,19 @@ def main() -> None:
                       for r in load(d, pre, "magnitude")])
         sp = [x["sparsity"] for x in load(d, pre, "forman")[0]["prune_curve"]]
         diff = f - m
-        axB.plot(sp, diff.mean(0), marker="o", ms=3.5, color=col[w], label=f"$h={w}$")
+        axB.plot(sp, diff.mean(0), marker="o", color=col[w], label=f"$h={w}$")
         axB.fill_between(sp, diff.mean(0) - diff.std(0, ddof=1) / np.sqrt(len(diff)),
                          diff.mean(0) + diff.std(0, ddof=1) / np.sqrt(len(diff)),
                          alpha=0.15, color=col[w])
     axB.axhline(0, color="k", lw=0.8)
     axB.axvline(GAMMA, color="0.5", lw=0.8, ls=":")
-    axB.annotate(r"$\gamma$", (GAMMA, axB.get_ylim()[0]), fontsize=9,
+    axB.annotate(r"$\gamma$", (GAMMA, axB.get_ylim()[0]), fontsize=18,
                  xytext=(GAMMA + 0.01, 0.9), textcoords=("data", "axes fraction"))
     axB.set_xlabel("pruned fraction (units)")
-    axB.set_ylabel("forman-TD $-$ magnitude-TD test accuracy")
-    axB.set_title("(b) the trade-off grows as width falls:\nworse within "
-                  r"$\gamma$, better past it", fontsize=10)
-    axB.grid(alpha=0.3); axB.legend(fontsize=8)
+    axB.set_ylabel("accuracy difference")
+    axB.set_title("(c) accuracy difference, forman-TD $-$ magnitude-TD")
+    axB.grid(alpha=0.3)
+    axB.legend(ncol=3, fontsize=14, loc="upper left", framealpha=0.9)
 
     # (c) fraction of units ever targeted, per arm
     for src, key, high, colr, lab in [("magnitude", "mag", False, MAG, "magnitude-TD"),
@@ -122,15 +130,11 @@ def main() -> None:
     axC.set_xticks(ws); axC.set_xticklabels(ws)
     axC.set_ylim(0.4, 1.02)
     axC.set_xlabel("hidden width $h$")
-    axC.set_ylabel("fraction of units ever targeted")
-    axC.set_title("(c) the mechanism: curvature's unstable ranking\nspreads "
-                  "robustness training over most units", fontsize=10)
-    axC.grid(alpha=0.3); axC.legend(fontsize=8)
+    axC.set_ylabel("")
+    axC.set_title("(b) units ever targeted")
+    axC.grid(alpha=0.3); axC.legend(fontsize=14)
 
-    fig.suptitle("E16 — width dose-response of the Targeted-Dropout comparison "
-                 "(mean $\\pm$ std/SEM, $n=10$ seeds; $h=512$ from E5)",
-                 fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.tight_layout()
     out = Path(args.out)
     fig.savefig(out.with_suffix(".png"), dpi=130, bbox_inches="tight")
     fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")

@@ -21,6 +21,11 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+plt.rcParams.update({
+    "font.size": 19, "axes.titlesize": 19, "axes.labelsize": 19,
+    "xtick.labelsize": 16, "ytick.labelsize": 16,
+    "legend.fontsize": 16, "legend.title_fontsize": 16,
+    "lines.linewidth": 2.5, "lines.markersize": 8})
 
 
 def overlap(curv, mag, s: float) -> float:
@@ -60,18 +65,16 @@ def main() -> None:
             vals = np.array([[overlap(e["layers"][L]["curv"], e["layers"][L]["mag"], s)
                               for e in log] for log in logs])
             m, sd = vals.mean(0), vals.std(0)
-            ax.plot(epochs, m, marker="o", ms=3, label=f"s = {s:g}")
+            ax.plot(epochs, m, marker="o", label=f"s = {s:g}")
             ax.fill_between(epochs, m - sd, m + sd, alpha=0.15)
-        ax.axhline(1.0, color="k", lw=0.5, ls=":")
+        ax.axhline(1.0, color="k", lw=1.2, ls=":")
         ax.set_ylim(0.5, 1.02)
         ax.set_xlabel("epoch")
-        ax.set_ylabel("prunable-set overlap  |F ∩ M| / k")
+        ax.set_ylabel("prunable-set overlap")
         ax.set_title(f"hidden layer {L}")
         ax.grid(alpha=0.3)
         ax.legend(title="sparsity")
-    fig.suptitle("Rank concordance: curvature and magnitude prune the same units\n"
-                 f"{args.config} (mean ± std over seeds)")
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.tight_layout()
     out = rdir / f"{args.config}_concordance.png"
     fig.savefig(out, dpi=130, bbox_inches="tight")
     fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")  # vector copy (thesis)

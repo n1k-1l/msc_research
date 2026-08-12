@@ -30,6 +30,11 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+plt.rcParams.update({
+    "font.size": 19, "axes.titlesize": 19, "axes.labelsize": 19,
+    "xtick.labelsize": 16, "ytick.labelsize": 16,
+    "legend.fontsize": 16, "legend.title_fontsize": 16,
+    "lines.linewidth": 2.5, "lines.markersize": 8})
 
 
 def load_logs(rdir: Path, config: str) -> list[list[dict]]:
@@ -87,17 +92,16 @@ def correlation_figure(logs: list[list[dict]], out: Path, title: str) -> None:
                               for e in log] for log in logs], dtype=float)
             mean = np.nanmean(vals, axis=0)
             std = np.nanstd(vals, axis=0)
-            ax.plot(epochs, mean, marker="o", ms=3, color=color, label=name)
+            ax.plot(epochs, mean, marker="o", color=color, label=name)
             ax.fill_between(epochs, mean - std, mean + std, alpha=0.2, color=color)
-        ax.axhline(0, color="k", lw=0.5)
-        ax.set_ylim(-1.05, 1.05)
+        ax.axhline(0, color="k", lw=1.2)
+        ax.set_ylim(-1.05, 0.15)
         ax.set_xlabel("epoch")
-        ax.set_ylabel("correlation(curvature, magnitude)")
+        ax.set_ylabel(r"$\rho(\kappa, \|w\|)$")
         ax.set_title(f"hidden layer {L}")
         ax.grid(alpha=0.3)
         ax.legend()
-    fig.suptitle(title)
-    fig.tight_layout(rect=(0, 0, 1, 0.985))
+    fig.tight_layout()
     fig.savefig(out, dpi=130, bbox_inches="tight")
     fig.savefig(Path(out).with_suffix(".pdf"), bbox_inches="tight")  # vector copy (thesis)
     print(f"saved -> {out} (+.pdf)")

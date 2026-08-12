@@ -28,6 +28,11 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+plt.rcParams.update({
+    "font.size": 19, "axes.titlesize": 19, "axes.labelsize": 19,
+    "xtick.labelsize": 16, "ytick.labelsize": 16,
+    "legend.fontsize": 16, "legend.title_fontsize": 16,
+    "lines.linewidth": 2.5, "lines.markersize": 8})
 
 # Shared palette: same criterion = same colour across every figure.
 STYLE = {
@@ -61,12 +66,12 @@ def acc_panel(ax, spars, curves, title, xlabel):
         if c not in curves:
             continue
         a = curves[c]
-        ax.plot(spars, a.mean(0), ls, color=col, marker=mk, ms=4, label=lab)
+        ax.plot(spars, a.mean(0), ls, color=col, marker=mk, label=lab)
         ax.fill_between(spars, a.mean(0) - a.std(0), a.mean(0) + a.std(0),
                         alpha=0.15, color=col)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("test accuracy")
-    ax.set_title(title, fontsize=10)
+    ax.set_title(title)
     ax.grid(alpha=0.3)
 
 
@@ -95,21 +100,23 @@ def main() -> None:
                              alias={"curvature": "forman"})
     sp_e, cv_e, rec_e = load(f"{args.mech_dir}/mnist_sparse_mech_seed*.json")
 
-    fig = plt.figure(figsize=(13.5, 8.2))
-    gs = fig.add_gridspec(2, 6, hspace=0.42, wspace=0.9)
-    axA = fig.add_subplot(gs[0, 0:2])
-    axB = fig.add_subplot(gs[0, 2:4])
-    axC = fig.add_subplot(gs[0, 4:6])
-    axD = fig.add_subplot(gs[1, 0:3])
-    axE = fig.add_subplot(gs[1, 3:6])
+    fig = plt.figure(figsize=(13, 12.5))
+    gs = fig.add_gridspec(3, 2, hspace=0.45, wspace=0.3)
+    axA = fig.add_subplot(gs[0, 0])
+    axB = fig.add_subplot(gs[0, 1])
+    axC = fig.add_subplot(gs[1, 0])
+    axD = fig.add_subplot(gs[1, 1])
+    axE = fig.add_subplot(gs[2, 0])
+    axL = fig.add_subplot(gs[2, 1])
+    axL.axis("off")
 
     # (a) / (b) accuracy: the ablation removes the collapse in both regimes
     acc_panel(axA, sp_h, cv_h,
-              f"(a) heavy-tailed topology ($\\sigma$={SIGMA:g}, density 0.5)",
+              f"(a) heavy-tailed ($\\sigma$={SIGMA:g})",
               "total edge sparsity")
-    axA.legend(fontsize=8, loc="lower left")
-    acc_panel(axB, sp_e, cv_e, "(b) ER topology (density 0.15)",
+    acc_panel(axB, sp_e, cv_e, "(b) ER topology",
               "total edge sparsity")
+    axB.set_ylabel("")
 
     # (c) coupling along the forman arm: F decouples, F_dc never does
     for spars, recs, regime, alpha in [(sp_h, rec_h, "heavy-tailed", 1.0),
@@ -118,42 +125,39 @@ def main() -> None:
                       for sr in recs["forman"]])
         fdc = np.array([[np.nanmean(x["spearman_dc_mag"]) for x in sr]
                         for sr in recs["forman"]])
-        axC.plot(spars, f.mean(0), "--", marker="s", ms=4, alpha=alpha,
+        axC.plot(spars, f.mean(0), "--", marker="s", alpha=alpha,
                  color=STYLE["forman"][0],
-                 label=f"$\\rho_S(F, |w|)$ — {regime}")
-        axC.plot(spars, fdc.mean(0), "-", marker="D", ms=4, alpha=alpha,
+                 label=f"$F$, {regime}")
+        axC.plot(spars, fdc.mean(0), "-", marker="D", alpha=alpha,
                  color=STYLE["forman_dc"][0],
-                 label=f"$\\rho_S(F_{{dc}}, |w|)$ — {regime}")
+                 label=f"$F_{{dc}}$, {regime}")
     axC.set_xlabel("total edge sparsity")
-    axC.set_ylabel("Spearman $\\rho$ with $|w|$ (survivors)")
-    axC.set_title("(c) only the degree part decouples", fontsize=10)
+    axC.set_ylabel(r"$\rho_S$ with $|w|$")
+    axC.set_title(r"(c) coupling with $|w|$")
     axC.grid(alpha=0.3)
-    axC.legend(fontsize=7.5, loc="upper right")
+    axC.legend(loc="upper left", fontsize=13)
 
     # (d) / (e) autopsy, heavy-tailed regime
     for c, (col, ls, mk, lab) in STYLE.items():
         dg = forensic_series(rec_h[c],
                              lambda f: f["pruned_deg_mean"] / f["surv_deg_mean"])
         pc = forensic_series(rec_h[c], lambda f: f["pruned_mag_pctile_mean"])
-        axD.plot(sp_h, np.nanmean(dg, 0), ls, color=col, marker=mk, ms=4, label=lab)
-        axE.plot(sp_h, np.nanmean(pc, 0), ls, color=col, marker=mk, ms=4, label=lab)
+        axD.plot(sp_h, np.nanmean(dg, 0), ls, color=col, marker=mk, label=lab)
+        axE.plot(sp_h, np.nanmean(pc, 0), ls, color=col, marker=mk, label=lab)
     axD.axhline(1.0, color="k", lw=0.8)
     axD.set_xlabel("total edge sparsity")
-    axD.set_ylabel("endpoint degree of kills\n/ survivor mean")
-    axD.set_title("(d) forman targets low-degree vertices from round one",
-                  fontsize=10)
+    axD.set_ylabel("kill degree / survivor mean")
+    axD.set_title("(d) endpoint degree of kills")
     axD.grid(alpha=0.3)
-    axD.legend(fontsize=8)
     axE.axhline(0.5, color="k", lw=0.8)
     axE.set_xlabel("total edge sparsity")
-    axE.set_ylabel("$|w|$ percentile of kills\n(0 = smallest weights)")
-    axE.set_title("(e) ...and drifts from deadwood to functional weights",
-                  fontsize=10)
+    axE.set_ylabel("kill $|w|$ percentile")
+    axE.set_title(r"(e) kill $|w|$ percentile")
     axE.grid(alpha=0.3)
+    handles, labels = axD.get_legend_handles_labels()
+    axL.legend(handles, labels, loc="center", fontsize=19, frameon=False,
+               title="criterion", title_fontsize=19)
 
-    fig.suptitle("E14 — the collapse mechanism: observed (d,e), accounted for (c), "
-                 "and removed by construction (a,b); mean $\\pm$ std, 10 seeds",
-                 fontsize=11)
     out = Path(args.out) if args.out else Path(args.mech_dir) / "mechanism"
     fig.savefig(out.with_suffix(".png"), dpi=130, bbox_inches="tight")
     fig.savefig(out.with_suffix(".pdf"), bbox_inches="tight")   # vector copy (thesis)
