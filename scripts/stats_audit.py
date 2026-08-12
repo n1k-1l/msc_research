@@ -4,7 +4,7 @@ Statistical audit of every paired comparison reported in the thesis.
 
 For each comparison: mean paired difference (percentage points), 95% CI on the
 difference (t-interval, df = n-1), Cohen's d_z (mean/sd of the paired
-differences), raw two-sided p, and Holm-adjusted p within the comparison's
+differences), raw two-sided p, and Bonferroni-adjusted p within the comparison's
 FAMILY. A family is one experiment x one criterion pair (i.e. one table or
 figure panel): the set of tests a reader would scan together.
 
@@ -50,17 +50,10 @@ def paired(a, b):
             "dz": m / sd if sd > 0 else np.nan, "t": t, "p": p}
 
 
-def holm(pvals):
-    """Holm step-down adjusted p-values."""
+def bonferroni(pvals):
+    """Bonferroni adjusted p-values: raw p times family size, capped at 1."""
     p = np.asarray(pvals, dtype=float)
-    order = np.argsort(p)
-    adj = np.empty_like(p)
-    running = 0.0
-    m = len(p)
-    for rank, idx in enumerate(order):
-        running = max(running, (m - rank) * p[idx])
-        adj[idx] = min(1.0, running)
-    return adj
+    return np.minimum(1.0, p * len(p))
 
 
 FAMILIES = []
@@ -69,9 +62,9 @@ FAMILIES = []
 def family(name, rows):
     """rows: list of (label, a, b) with a, b seed-matched accuracy vectors."""
     tests = [(label, paired(a, b)) for label, a, b in rows]
-    adj = holm([t[1]["p"] for t in tests])
+    adj = bonferroni([t[1]["p"] for t in tests])
     for (label, st), pa in zip(tests, adj):
-        st["p_holm"] = pa
+        st["p_bonf"] = pa
         st["label"] = label
     FAMILIES.append((name, [t[1] for t in tests]))
 
@@ -156,10 +149,10 @@ if het:
 for name, tests in FAMILIES:
     print(f"\n### {name}  (m = {len(tests)} tests in family)")
     print(f"{'':8s} {'diff(pp)':>9s} {'95% CI':>18s} {'d_z':>6s} "
-          f"{'t':>6s} {'p':>8s} {'p_holm':>8s}  sig")
+          f"{'t':>6s} {'p':>8s} {'p_bonf':>8s}  sig")
     for s in tests:
-        sig = "**" if s["p_holm"] < 0.05 else ("(*)" if s["p"] < 0.05 else "")
+        sig = "**" if s["p_bonf"] < 0.05 else ("(*)" if s["p"] < 0.05 else "")
         print(f"{s['label']:8s} {100*s['diff']:>+9.2f} "
               f"[{100*s['lo']:>+7.2f},{100*s['hi']:>+7.2f}] {s['dz']:>6.2f} "
-              f"{s['t']:>6.2f} {s['p']:>8.4f} {s['p_holm']:>8.4f}  {sig}")
-print("\n**: survives Holm within family at 0.05 | (*): raw p<0.05 only")
+              f"{s['t']:>6.2f} {s['p']:>8.4f} {s['p_bonf']:>8.4f}  {sig}")
+print("\n**: survives Bonferroni within family at 0.05 | (*): raw p<0.05 only")
