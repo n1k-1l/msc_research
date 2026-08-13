@@ -111,29 +111,18 @@ def run_one(cfg, seed: int, data_root: str, results_dir: Path,
     if getattr(cfg, "iterative_prune", False):
         criteria = getattr(cfg, "prune_criteria", None) or CRITERIA
         if getattr(cfg, "arch", "mlp") == "lenet":
-            if cfg.prune_granularity == "unit":
-                # whole-filter (structured): the CNN analogue of unit pruning
-                from src.cnn_prune import filter_prune_by_criteria
-                out["iterative_prune_curves"] = filter_prune_by_criteria(
-                    model, loaders=(data.train, data.val, data.test),
-                    device=device, schedule=cfg.prune_schedule,
-                    finetune_epochs=cfg.finetune_epochs, lr=cfg.lr,
-                    criteria=criteria)
-            else:
-                from src.cnn_prune import cnn_prune_by_criteria
-                out["iterative_prune_curves"] = cnn_prune_by_criteria(
-                    model, loaders=(data.train, data.val, data.test),
-                    device=device, schedule=cfg.prune_schedule,
-                    finetune_epochs=cfg.finetune_epochs,
-                    lr=cfg.lr, criteria=criteria,
-                    calib_batches=getattr(cfg, "calib_batches", 2))
+            from src.cnn_prune import cnn_prune_by_criteria
+            out["iterative_prune_curves"] = cnn_prune_by_criteria(
+                model, loaders=(data.train, data.val, data.test),
+                device=device, schedule=cfg.prune_schedule,
+                finetune_epochs=cfg.finetune_epochs,
+                lr=cfg.lr, criteria=criteria)
         else:
             out["iterative_prune_curves"] = iterative_prune_by_criteria(
                 model, loaders=(data.train, data.val, data.test), device=device,
                 schedule=cfg.prune_schedule, finetune_epochs=cfg.finetune_epochs,
                 lr=cfg.lr, granularity=cfg.prune_granularity,
-                criteria=criteria, init_masks=sparse_masks,
-                calib_batches=getattr(cfg, "calib_batches", 2))
+                criteria=criteria, init_masks=sparse_masks)
     path = results_dir / f"{cfg.name}_seed{seed}.json"
     path.write_text(json.dumps(out, indent=2))
     print(f"  saved -> {path}")

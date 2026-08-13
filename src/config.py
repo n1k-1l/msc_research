@@ -59,15 +59,14 @@ class ExpConfig:
         default_factory=lambda: [0.2, 0.4, 0.6, 0.8, 0.9, 0.95])
     finetune_epochs: int = 5                 # fine-tune epochs between prune rounds
     # Sparse-by-construction net (fixed random topology): gives genuinely non-uniform
-    # degree independently of magnitude, so graph curvature (Forman/Ollivier) has real
-    # geometric content and Ollivier-Ricci is tractable. When sparse_init, a fixed
+    # degree independently of magnitude, so graph curvature has real
+    # geometric content. When sparse_init, a fixed
     # random mask at sparse_density is applied per layer and held through training;
     # pruning then starts from that topology. prune_criteria selects which scores to
     # compare (defaults to the CRITERIA tuple when None).
     sparse_init: bool = False
     sparse_density: float = 0.15             # keep-fraction of the fixed random topology
     prune_criteria: Optional[List[str]] = None
-    calib_batches: int = 2                   # train batches averaged for activation-dependent criteria
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -275,8 +274,7 @@ def _sparse_prune_configs() -> Dict[str, ExpConfig]:
     Here the topology is non-uniform by construction and chosen independently of
     magnitude, and it is sparse enough that Ollivier-Ricci is tractable. Train one
     fixed-sparse net per seed, then prune further by each criterion (accuracy vs
-    additional sparsity). ollivier_topo (unweighted metric) is the one signal that
-    decouples from magnitude; ollivier (weighted 1/|w|) and forman track it.
+    additional sparsity).
     """
     return {
         "mnist_sparse_ip": ExpConfig(
@@ -285,8 +283,8 @@ def _sparse_prune_configs() -> Dict[str, ExpConfig]:
             iterative_prune=True, sparse_init=True, sparse_density=0.15,
             finetune_epochs=3,
             prune_schedule=[0.85, 0.88, 0.91, 0.94, 0.96],
-            prune_criteria=["magnitude", "random", "forman", "ollivier",
-                            "ollivier_topo"]),
+            # ORC criteria retired 2026-07-28; the thesis reports these three arms
+            prune_criteria=["magnitude", "forman", "random"]),
         # Mechanism study (E14): WHY does Forman collapse? Same protocol as
         # mnist_sparse_ip but adds forman_dc (degree-corrected Forman -- the
         # causal ablation: if the collapse vanishes when the degree term is
@@ -322,18 +320,6 @@ def _cnn_prune_configs() -> Dict[str, ExpConfig]:
             # ORC criteria retired from the thesis (2026-07-28); n=10 rerun
             # (2026-08-13) uses the three reported arms only.
             prune_criteria=["magnitude", "forman", "random"]),
-        # Whole-FILTER (structured) pruning -- the practically dominant CNN
-        # granularity and the structured counterpart of the E9 unit control.
-        # Removing whole filters keeps the channel graph complete bipartite among
-        # survivors (uniform degree), so the mechanism predicts forman ~ magnitude
-        # with no collapse. Wider convs (32, 64) so the filter sweep has granularity.
-        "mnist_lenet_filter": ExpConfig(
-            name="mnist_lenet_filter", dataset="mnist", widths=[784, 10],
-            arch="lenet", dropout_kind="none", p=0.0, epochs=15,
-            iterative_prune=True, prune_granularity="unit", finetune_epochs=2,
-            prune_schedule=[0.3, 0.5, 0.7, 0.85, 0.92],
-            prune_criteria=["magnitude", "curvature", "random"],
-            extra={"conv_channels": [32, 64]}),
     }
 
 

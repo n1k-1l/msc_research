@@ -10,8 +10,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.models import LeNet
-from src.cnn_prune import (graph_views, ConvView, collect_channel_activations,
-                           cnn_prune_one)
+from src.cnn_prune import graph_views, ConvView, cnn_prune_one
 
 
 def test_graph_views_shapes():
@@ -35,15 +34,6 @@ def test_conv_view_matrix_and_mask():
     assert torch.count_nonzero(conv.weight[3, 2]) == 0
     assert torch.count_nonzero(conv.weight[0, 0]) > 0     # others untouched
 
-
-def test_channel_activation_lengths():
-    model = LeNet()
-    views = graph_views(model)
-    x, y = torch.randn(8, 1, 28, 28), torch.randint(0, 10, (8,))
-    acts = collect_channel_activations(model, views, [(x, y)], torch.device("cpu"))
-    for v, (a_in, a_out) in zip(views, acts):
-        assert a_in.numel() == v.matrix.shape[1]
-        assert a_out.numel() == v.matrix.shape[0]
 
 
 def test_cnn_prune_one_keeps_pruned_zero():

@@ -32,7 +32,6 @@ breaks as the graph sparsifies.
 from __future__ import annotations
 from typing import Dict, List, Optional, Sequence, Tuple
 import copy
-import itertools
 
 import numpy as np
 import torch
@@ -44,10 +43,6 @@ from .train import evaluate
 
 CRITERIA = ("magnitude", "curvature", "random")
 
-# Criteria that need per-neuron activation vectors (data-dependent scoring).
-_ACT_CRITERIA = ("forman_act",)
-# Criteria that call the (heavier) Ollivier-Ricci solver (library implementation).
-_OLLIVIER_CRITERIA = ("ollivier", "ollivier_topo")
 
 
 @torch.no_grad()
@@ -83,8 +78,8 @@ def make_sparse_masks(linears, density: float, generator: torch.Generator):
     """Fixed random (Erdos-Renyi) edge mask per Linear at the given keep-density.
 
     Gives a sparse-by-construction, non-uniform-degree topology chosen independently
-    of weight magnitude -- the honest setting for comparing curvature vs magnitude
-    (and where Ollivier-Ricci becomes tractable). Held fixed through training.
+    of weight magnitude -- the honest setting for comparing curvature vs magnitude.
+    Held fixed through training.
     """
     masks = []
     for lin in linears:
@@ -145,17 +140,8 @@ def _finetune(model: nn.Module, train_loader, device, epochs: int, lr: float,
 # --------------------------------------------------------------------------- #
 # edge (unstructured) pruning
 # --------------------------------------------------------------------------- #
-def _act_gate(A: torch.Tensor, act: Tuple[torch.Tensor, torch.Tensor],
-              eps: float = 1e-6) -> torch.Tensor:
-    """Gate edge strengths by endpoint activations (data-dependence): an edge touching
-    a rarely-firing neuron looks weaker. act = (a_src[n_src], a_tgt[n_tgt])."""
-    a_src, a_tgt = act
-    g = torch.sqrt(a_src[None, :].clamp_min(eps) * a_tgt[:, None].clamp_min(eps))
-    return A * g
 
-
-def _edge_scores(W: torch.Tensor, mask: torch.Tensor, criterion: str,
-                 act: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+def _edge_scores(W: torch.Tensor, mask: torch.Tensor, criterion: str
                  ) -> Tuple[torch.Tensor, bool]:
     """Per-edge prunability score and whether the most prunable is the LARGEST.
 
@@ -163,10 +149,6 @@ def _edge_scores(W: torch.Tensor, mask: torch.Tensor, criterion: str,
     curvature/forman: most positive Forman F(e) prunable -- redundant (largest=True).
     forman_dc:     DEGREE-CORRECTED Forman (neighbour mean, not sum) -- the causal
                    ablation for the collapse mechanism; most positive prunable.
-    forman_act:    Forman on activation-gated weights (data-dependent).
-    ollivier:      Ollivier-Ricci, weighted 1/|w| metric (library implementation);
-                   most positive prunable (largest=True).
-    ollivier_topo: Ollivier-Ricci on the unweighted graph -- pure topology.
     random:        control.
     """
     A = W.abs()
@@ -178,24 +160,13 @@ def _edge_scores(W: torch.Tensor, mask: torch.Tensor, criterion: str,
         return forman_edges_masked(A, mask), True
     if criterion == "forman_dc":
         return forman_dc_edges_masked(A, mask), True
-    if criterion == "forman_act":
-        return forman_edges_masked(_act_gate(A, act), mask), True
-    if criterion in _OLLIVIER_CRITERIA:
-        from .ollivier import ollivier_edges_masked
-        if criterion == "ollivier_topo":
-            # Unweighted metric: isolates graph geometry from weight magnitude (a
-            # weighted 1/|w| metric makes ORC a near-perfect magnitude proxy).
-            return ollivier_edges_masked(torch.ones_like(W), mask), True
-        return ollivier_edges_masked(W, mask), True
     raise ValueError(f"unknown criterion {criterion!r}")
 
 
 @torch.no_grad()
-def _prune_edges_to(linears, masks, criterion: str, target: float,
-                    acts: Optional[List[torch.Tensor]] = None) -> List[Dict]:
+def _prune_edges_to(linears, masks, criterion: str, target: float) -> List[Dict]:
     """Prune each layer's surviving edges down to cumulative sparsity `target`
-    (per-layer, so no layer can be wiped out). `acts` (per-layer activation vectors,
-    length n_layers+1) is required for the data-dependent criteria.
+    (per-layer, so no layer can be wiped out).
 
     Returns per-layer FORENSICS on what this step killed -- the mechanism autopsy:
     where the pruned edges sat in the |w| ranking, the degree of their endpoints
@@ -210,9 +181,8 @@ def _prune_edges_to(linears, masks, criterion: str, target: float,
         n_new = int(round(target * total)) - int((~m).sum())
         if n_new <= 0:
             forensics.append({"layer": k, "n_pruned": 0})
-            continue                            # skip scoring (esp. costly Ollivier) on no-op
-        act = (acts[k], acts[k + 1]) if acts is not None else None
-        scores, largest = _edge_scores(lin.weight, m, criterion, act=act)
+            continue                            # skip scoring on no-op rounds
+        scores, largest = _edge_scores(lin.weight, m, criterion)
         surv = m.view(-1).nonzero(as_tuple=True)[0]
         n_take = min(n_new, surv.numel())
         sel = torch.topk(scores.view(-1)[surv], n_take, largest=largest).indices
@@ -377,15 +347,12 @@ def _measure(linears, masks, model, val_loader, test_loader, device,
 def iterative_prune_one(model: nn.Module, criterion: str, loaders, device,
                         schedule: Sequence[float], finetune_epochs: int, lr: float,
                         granularity: str = "edge",
-                        init_masks: Optional[Sequence[torch.Tensor]] = None,
-                        calib_batches: int = 2) -> List[Dict]:
+                        init_masks: Optional[Sequence[torch.Tensor]] = None) -> List[Dict]:
     """Prune one model by `criterion` over `schedule`, fine-tuning between rounds.
 
     init_masks: starting edge masks. None => dense (all-ones). For the sparse-by-
     construction study, pass the fixed sparse topology so pruning starts from it and
-    Forman/Ollivier see genuine non-uniform degree (not self-imposed).
-    calib_batches: how many train batches to average activations over (data-dependent
-    criteria only).
+    Forman sees genuine non-uniform degree (not self-imposed).
     """
     train_loader, val_loader, test_loader = loaders
     model = model.to(device)
@@ -395,18 +362,12 @@ def iterative_prune_one(model: nn.Module, criterion: str, loaders, device,
     else:
         masks = [torch.ones_like(lin.weight, dtype=torch.bool) for lin in linears]
     _register_grad_masks(linears, masks)
-    needs_act = criterion in _ACT_CRITERIA
 
     records = []
     for r, target in enumerate(schedule):
-        acts = None
-        if needs_act:
-            from .activations import collect_activations
-            batches = list(itertools.islice(train_loader, calib_batches))
-            acts = collect_activations(model, batches, device)
         forensics = None
         if granularity == "edge":
-            forensics = _prune_edges_to(linears, masks, criterion, target, acts=acts)
+            forensics = _prune_edges_to(linears, masks, criterion, target)
         elif granularity == "unit":
             _prune_units_to(linears, masks, criterion, target)
         else:
@@ -424,12 +385,12 @@ def iterative_prune_by_criteria(dense_model: nn.Module, loaders, device,
                                 schedule: Sequence[float], finetune_epochs: int,
                                 lr: float, granularity: str = "edge",
                                 criteria: Sequence[str] = CRITERIA,
-                                init_masks: Optional[Sequence[torch.Tensor]] = None,
-                                calib_batches: int = 2) -> Dict[str, List[Dict]]:
+                                init_masks: Optional[Sequence[torch.Tensor]] = None
+                                ) -> Dict[str, List[Dict]]:
     """Prune the SAME trained net by each criterion (identical start weights + topology),
     return {criterion: [per-round record]}. Mirrors prune_by_criteria. For the sparse
     study pass init_masks (the fixed topology) and the full criteria set."""
     return {c: iterative_prune_one(copy.deepcopy(dense_model), c, loaders, device,
                                    schedule, finetune_epochs, lr, granularity,
-                                   init_masks=init_masks, calib_batches=calib_batches)
+                                   init_masks=init_masks)
             for c in criteria}
