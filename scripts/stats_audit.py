@@ -145,6 +145,14 @@ if het:
     family("E14b hetero(1.0): F_dc - magnitude",
            [(f"s={s}", ad[:, i], am[:, i]) for i, s in enumerate(sp)])
 
+# ---- E11 (n=10): CNN channel-graph pruning ---------------------------------
+cnn = load("results_cnn10/mnist_lenet_ip_seed*.json")
+if cnn:
+    sp, am = ip_curve(cnn, "magnitude")
+    _, ac = ip_curve(cnn, "forman")
+    family("E11 CNN channel graph: forman - magnitude",
+           [(f"s={s}", ac[:, i], am[:, i]) for i, s in enumerate(sp)])
+
 # ---- report ---------------------------------------------------------------
 for name, tests in FAMILIES:
     print(f"\n### {name}  (m = {len(tests)} tests in family)")

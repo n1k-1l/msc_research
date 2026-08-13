@@ -319,8 +319,9 @@ def _cnn_prune_configs() -> Dict[str, ExpConfig]:
             dropout_kind="none", p=0.0, epochs=15,
             iterative_prune=True, finetune_epochs=2,
             prune_schedule=[0.3, 0.5, 0.7, 0.85, 0.92],
-            prune_criteria=["magnitude", "random", "forman", "ollivier",
-                            "ollivier_topo"]),
+            # ORC criteria retired from the thesis (2026-07-28); n=10 rerun
+            # (2026-08-13) uses the three reported arms only.
+            prune_criteria=["magnitude", "forman", "random"]),
         # Whole-FILTER (structured) pruning -- the practically dominant CNN
         # granularity and the structured counterpart of the E9 unit control.
         # Removing whole filters keeps the channel graph complete bipartite among
