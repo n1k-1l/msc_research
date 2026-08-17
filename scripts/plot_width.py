@@ -76,7 +76,7 @@ def main() -> None:
             for r in load(d, pre, "forman"):
                 last = r["curvature_log"][-1]["layers"][L]
                 rhos.append(spearman(np.array(last["curv"]), np.array(last["mag"])))
-            mean.append(np.mean(rhos)); std.append(np.std(rhos, ddof=1))
+            mean.append(np.mean(rhos)); std.append(np.std(rhos))
         axA.errorbar(ws, mean, yerr=std, marker=mk, color="#1f77b4",
                      ls="-" if L == 0 else "--", label=lab, capsize=3)
     axA.set_xscale("log", base=2)
@@ -122,7 +122,7 @@ def main() -> None:
                     sets, n = targeted_sets(r, L, key, high)
                     per_layer.append(len(set().union(*sets)) / n)
                 fr.append(np.mean(per_layer))
-            mean.append(np.mean(fr)); std.append(np.std(fr, ddof=1))
+            mean.append(np.mean(fr)); std.append(np.std(fr))
         axC.errorbar(ws, mean, yerr=std, marker="o", color=colr, label=lab, capsize=3)
     axC.axhline(GAMMA, color="k", lw=0.8, ls=":",
                 label=r"$\gamma$ (frozen set)")
